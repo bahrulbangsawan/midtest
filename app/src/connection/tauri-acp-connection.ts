@@ -11,6 +11,34 @@ export interface Deps {
   listen: (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
 }
 
+/**
+ * A `SubscribeConnectionAdapter` for `useChat`, plus a `whenReady()` escape
+ * hatch that the plain adapter interface has no room for — see its doc
+ * comment for why it exists and how a caller should use it.
+ */
+export interface TauriAcpConnection extends SubscribeConnectionAdapter {
+  /**
+   * Resolves once the Tauri event listener registered by the most recent
+   * `subscribe()` call is live.
+   *
+   * Registering a Tauri listener is a real IPC round-trip in production
+   * (unlike the synchronous test double used here), so there is a window
+   * between calling `subscribe()` and the listener actually being able to
+   * receive events. The Rust side emits `RUN_STARTED` as soon as
+   * `send_prompt` runs — if that lands before the listener is registered,
+   * it is lost upstream of this module's buffer, and `useChat` never sees
+   * the turn start.
+   *
+   * `subscribe()` registers the listener eagerly (not lazily on first
+   * `next()`) to narrow this window, but narrowing is not closing it: a
+   * caller that calls `sendMessage()` immediately after mounting `useChat`
+   * can still race ahead of registration. The caller (Task 8) should mount
+   * `useChat` with `live: true` (so `subscribe()` runs on mount) and
+   * `await whenReady()` before issuing the first `sendMessage()`.
+   */
+  whenReady: () => Promise<void>;
+}
+
 const AGUI_EVENT = 'agui';
 
 /**
@@ -58,11 +86,10 @@ class AsyncQueue<T> {
 }
 
 /**
- * Extracts the text of the most recent message, whether it is a `UIMessage`
- * (text lives in `parts[].text` or `parts[].content`) or a `ModelMessage`
- * (text lives directly in `content` as a string). Runtime duck-typing is
- * used deliberately so this stays decoupled from the exact TanStack AI
- * message shape.
+ * Extracts the text of the most recent message. `UIMessage` carries text as
+ * `parts[].content` on a `{ type: 'text' }` part (verified against
+ * `@tanstack/ai`'s installed `TextPart` type — there is no `text` field);
+ * `ModelMessage` carries it directly as a string `content`.
  */
 function extractLatestText(messages: ReadonlyArray<unknown>): string {
   const last = messages[messages.length - 1];
@@ -73,8 +100,7 @@ function extractLatestText(messages: ReadonlyArray<unknown>): string {
     for (const part of withParts.parts) {
       if (part === null || typeof part !== 'object') continue;
       if ((part as { type?: unknown }).type !== 'text') continue;
-      const textPart = part as { text?: unknown; content?: unknown };
-      if (typeof textPart.text === 'string') return textPart.text;
+      const textPart = part as { content?: unknown };
       if (typeof textPart.content === 'string') return textPart.content;
     }
     return '';
@@ -92,78 +118,97 @@ function extractLatestText(messages: ReadonlyArray<unknown>): string {
  * - `subscribe` yields AG-UI events (`StreamChunk`s) delivered via the
  *   `agui` Tauri event.
  */
-export function createTauriAcpConnection(deps: Deps): SubscribeConnectionAdapter {
+export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
+  // Tracks the listener-registration promise of the most recent
+  // `subscribe()` call, for `whenReady()` below.
+  let currentListenerReady: Promise<void> = Promise.resolve();
+
+  function subscribe(abortSignal?: AbortSignal): AsyncIterable<StreamChunk> {
+    const queue = new AsyncQueue<StreamChunk>();
+    let unlisten: (() => void) | undefined;
+    let aborted = false;
+
+    // Single place that actually calls the Tauri-provided `stop` function.
+    // Both abort timings below — abort while `listen()` is still in flight,
+    // and abort after it has already resolved — funnel through this one
+    // function, so there is exactly one line that can regress into a leak.
+    const releaseListener = (): void => {
+      if (unlisten) {
+        unlisten();
+        unlisten = undefined;
+      }
+    };
+
+    // Registered eagerly, right here at `subscribe()` time, exactly once —
+    // not deferred into `next()`, and not re-issued on later `next()`
+    // calls. This is both correctness (no per-iteration re-registration,
+    // which would leak listeners and duplicate every later event) and a
+    // best-effort narrowing of the registration-race window described on
+    // `TauriAcpConnection.whenReady`.
+    const listenerReady: Promise<void> = deps
+      .listen(AGUI_EVENT, (event) => {
+        queue.push(event.payload as StreamChunk);
+      })
+      .then((stop) => {
+        unlisten = stop;
+        // If we were aborted while the listener registration was still in
+        // flight, release it immediately instead of leaking.
+        if (aborted) {
+          releaseListener();
+        }
+      });
+    currentListenerReady = listenerReady;
+    // Fire-and-forget from this scope's perspective: don't let a
+    // registration failure become an "unhandled rejection" before any
+    // consumer calls `next()`. `next()` below awaits the same promise
+    // object and will still see (and can surface) the rejection.
+    listenerReady.catch(() => {});
+
+    const cleanup = (): void => {
+      if (aborted) return;
+      aborted = true;
+      queue.close();
+      releaseListener();
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        cleanup();
+      } else {
+        abortSignal.addEventListener('abort', cleanup, { once: true });
+      }
+    }
+
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<StreamChunk> {
+        return {
+          async next(): Promise<IteratorResult<StreamChunk>> {
+            await listenerReady;
+            if (aborted) {
+              return { value: undefined, done: true };
+            }
+            return queue.next();
+          },
+          async return(): Promise<IteratorResult<StreamChunk>> {
+            cleanup();
+            if (abortSignal) {
+              abortSignal.removeEventListener('abort', cleanup);
+            }
+            return { value: undefined, done: true };
+          },
+        };
+      },
+    };
+  }
+
   return {
+    subscribe,
     async send(messages) {
       const text = extractLatestText(messages);
       await deps.invoke('send_prompt', { text });
     },
-
-    subscribe(abortSignal) {
-      const queue = new AsyncQueue<StreamChunk>();
-      let unlisten: (() => void) | undefined;
-      let listenerPromise: Promise<void> | undefined;
-      let aborted = false;
-
-      // Registers the Tauri event listener exactly once per `subscribe()`
-      // call, no matter how many times `next()` is invoked.
-      const ensureListening = (): Promise<void> => {
-        if (!listenerPromise) {
-          listenerPromise = deps
-            .listen(AGUI_EVENT, (event) => {
-              queue.push(event.payload as StreamChunk);
-            })
-            .then((stop) => {
-              // If we were aborted while the listener registration was
-              // still in flight, release it immediately instead of leaking.
-              if (aborted) {
-                stop();
-              } else {
-                unlisten = stop;
-              }
-            });
-        }
-        return listenerPromise;
-      };
-
-      const cleanup = (): void => {
-        if (aborted) return;
-        aborted = true;
-        queue.close();
-        if (unlisten) {
-          unlisten();
-          unlisten = undefined;
-        }
-      };
-
-      if (abortSignal) {
-        if (abortSignal.aborted) {
-          cleanup();
-        } else {
-          abortSignal.addEventListener('abort', cleanup, { once: true });
-        }
-      }
-
-      return {
-        [Symbol.asyncIterator](): AsyncIterator<StreamChunk> {
-          return {
-            async next(): Promise<IteratorResult<StreamChunk>> {
-              await ensureListening();
-              if (aborted) {
-                return { value: undefined, done: true };
-              }
-              return queue.next();
-            },
-            async return(): Promise<IteratorResult<StreamChunk>> {
-              cleanup();
-              if (abortSignal) {
-                abortSignal.removeEventListener('abort', cleanup);
-              }
-              return { value: undefined, done: true };
-            },
-          };
-        },
-      };
+    whenReady(): Promise<void> {
+      return currentListenerReady;
     },
   };
 }
