@@ -7,7 +7,11 @@ import type { StreamChunk } from '@tanstack/ai/client';
  * `@tauri-apps/api/core#invoke` and `@tauri-apps/api/event#listen`.
  */
 export interface Deps {
-  invoke: (cmd: string, args?: unknown) => Promise<unknown>;
+  // `Record<string, unknown>` rather than `unknown`: Tauri's own `invoke`
+  // narrows its second parameter to `InvokeArgs`, and under
+  // `strictFunctionTypes` a wider parameter here would make the real `invoke`
+  // unassignable to this field — forcing the call site to cast.
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
 }
 
@@ -18,8 +22,9 @@ export interface Deps {
  */
 export interface TauriAcpConnection extends SubscribeConnectionAdapter {
   /**
-   * Resolves once the Tauri event listener registered by the most recent
-   * `subscribe()` call is live.
+   * Resolves once the Tauri event listener of the *currently live*
+   * `subscribe()` call is registered — and rejects, loudly, whenever there
+   * is no such listener to wait for.
    *
    * Registering a Tauri listener is a real IPC round-trip in production
    * (unlike the synchronous test double used here), so there is a window
@@ -32,9 +37,27 @@ export interface TauriAcpConnection extends SubscribeConnectionAdapter {
    * `subscribe()` registers the listener eagerly (not lazily on first
    * `next()`) to narrow this window, but narrowing is not closing it: a
    * caller that calls `sendMessage()` immediately after mounting `useChat`
-   * can still race ahead of registration. The caller (Task 8) should mount
-   * `useChat` with `live: true` (so `subscribe()` runs on mount) and
-   * `await whenReady()` before issuing the first `sendMessage()`.
+   * can still race ahead of registration. The caller must mount `useChat`
+   * with `live: true` (so `subscribe()` runs on mount) and `await
+   * whenReady()` before issuing each `sendMessage()`.
+   *
+   * Two ways this guard could silently *not* guard anything, both closed
+   * here rather than left to the caller:
+   *
+   * 1. **Called before any `subscribe()`.** There is no listener, so there
+   *    is nothing to be ready. Resolving in that state would hand the
+   *    caller a green light for a listener that does not exist; instead
+   *    this rejects with a message naming the mistake.
+   * 2. **Superseded by a later `subscribe()`.** React StrictMode
+   *    double-invokes effects (mount → cleanup → mount), so the listener
+   *    that was live when `whenReady()` was called can be torn down and
+   *    replaced while the promise is still pending. `whenReady()` follows
+   *    the replacement instead of resolving against the dead listener; if
+   *    the listener is torn down and *not* replaced, it rejects.
+   *
+   * Both failure modes reject rather than hang: a caller that awaits this
+   * before sending will surface an error instead of a spinner that never
+   * stops.
    */
   whenReady: () => Promise<void>;
 }
@@ -118,10 +141,24 @@ function extractLatestText(messages: ReadonlyArray<unknown>): string {
  * - `subscribe` yields AG-UI events (`StreamChunk`s) delivered via the
  *   `agui` Tauri event.
  */
+/**
+ * Bookkeeping for one `subscribe()` call, so `whenReady()` can tell "the
+ * listener I am waiting for" apart from "some listener, once, at some point".
+ */
+interface Subscription {
+  /** Resolves when this call's Tauri listener is registered. */
+  readonly ready: Promise<void>;
+  /** True once this call's listener has been torn down. */
+  readonly isTornDown: () => boolean;
+}
+
 export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
-  // Tracks the listener-registration promise of the most recent
-  // `subscribe()` call, for `whenReady()` below.
-  let currentListenerReady: Promise<void> = Promise.resolve();
+  // The most recent `subscribe()` call, or `undefined` while none has run.
+  //
+  // `undefined` is load-bearing. The obvious initial value — an
+  // already-resolved promise — makes `whenReady()` return "ready" before any
+  // listener exists, which is precisely the state the guard exists to catch.
+  let current: Subscription | undefined;
 
   function subscribe(abortSignal?: AbortSignal): AsyncIterable<StreamChunk> {
     const queue = new AsyncQueue<StreamChunk>();
@@ -157,7 +194,11 @@ export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
           releaseListener();
         }
       });
-    currentListenerReady = listenerReady;
+    const subscription: Subscription = {
+      ready: listenerReady,
+      isTornDown: () => aborted,
+    };
+    current = subscription;
     // Fire-and-forget from this scope's perspective: don't let a
     // registration failure become an "unhandled rejection" before any
     // consumer calls `next()`. `next()` below awaits the same promise
@@ -201,14 +242,41 @@ export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
     };
   }
 
+  /** See `TauriAcpConnection.whenReady` for the contract this implements. */
+  async function whenReady(): Promise<void> {
+    const active = current;
+    if (!active) {
+      throw new Error(
+        'Langganan event agen belum dimulai: whenReady() dipanggil sebelum subscribe(). ' +
+          'Pasang useChat dengan live: true, dan panggil whenReady() dari komponen yang sama.',
+      );
+    }
+
+    await active.ready;
+
+    if (current !== active) {
+      // A newer `subscribe()` replaced the one we were waiting for while its
+      // registration was still in flight — the StrictMode mount → cleanup →
+      // mount sequence. Resolving now would report a listener that has
+      // already been released, so wait on its replacement instead. The
+      // recursion is bounded by the number of remounts, and each step awaits
+      // a real registration promise rather than spinning.
+      return whenReady();
+    }
+
+    if (active.isTornDown()) {
+      throw new Error(
+        'Langganan event agen sudah dilepas: tidak ada pendengar yang aktif untuk giliran ini.',
+      );
+    }
+  }
+
   return {
     subscribe,
     async send(messages) {
       const text = extractLatestText(messages);
       await deps.invoke('send_prompt', { text });
     },
-    whenReady(): Promise<void> {
-      return currentListenerReady;
-    },
+    whenReady,
   };
 }
