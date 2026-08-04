@@ -71,4 +71,12 @@ test('build_walkthrough melaporkan galat build-demo apa adanya', async () => {
     arguments: { reportPath: rusak, out: join(dir, 'keluar.html') },
   });
   assert.equal(hasil.isError, true);
+  // Memastikan stderr asli dari build-demo.js benar-benar diteruskan, bukan
+  // pesan generik: build-demo.js selalu menulis "Tidak ada data langkah di
+  // <basename>." ke stderr ketika berkas input tidak punya blok dump
+  // (lihat build-demo.js baris ~930). rusak selalu bernama "rusak.html".
+  assert.match(
+    (hasil.content as any)[0].text,
+    /Tidak ada data langkah di rusak\.html/,
+  );
 });
