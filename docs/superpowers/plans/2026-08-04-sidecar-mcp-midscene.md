@@ -56,14 +56,65 @@ sekadar ACP client, dan login tetap terjadi di `codex login` milik pengguna.
 Prasyarat yang harus dideteksi aplikasi jadi **empat**, bukan dua: `codex` CLI **dan**
 `codex-acp` untuk sisi Codex; Claude Code **dan** `claude-agent-acp` untuk sisi Claude.
 
-Belum dijalankan: handshake `initialize` terhadap `codex-acp` untuk memastikan dukungan
-`mcpServers` dan `promptCapabilities.image`. Perintahnya:
+Handshake `codex-acp` 1.1.9 sudah dijalankan. Balasannya:
 
-```
-! npm install -g @agentclientprotocol/codex-acp && codex-acp --version
+```json
+{"protocolVersion":1,
+ "agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.1.9"},
+ "agentCapabilities":{
+   "promptCapabilities":{"embeddedContext":true,"image":true},
+   "mcpCapabilities":{"acp":false,"http":true,"sse":false},
+   "auth":{"logout":{}},"loadSession":true,
+   "sessionCapabilities":{"resume":{},"list":{},"close":{},"delete":{},
+                          "additionalDirectories":{}}},
+ "authMethods":[
+   {"id":"api-key","name":"API Key","_meta":{"api-key":{"provider":"openai"}}},
+   {"id":"chat-gpt","name":"ChatGPT","description":"Use ChatGPT to authenticate"}]}
 ```
 
-lalu handshake yang sama seperti Step 2.
+Catatan: `codex-acp` tidak berbicara langsung ke model. Ia men-spawn
+`${CODEX_PATH ?? "codex"} app-server` — jadi ia penerjemah ACP ⟷ protokol app-server
+milik Codex, dan mengemudikan CLI `codex` global milik pengguna. Paket ini memang
+membundel salinan Codex sendiri, tetapi resolusinya default ke `"codex"` dari PATH.
+`CODEX_PATH` bisa dipakai untuk mengarahkan ulang.
+
+**AUTH — ini yang paling penting bagi tujuan biaya.** Codex menawarkan dua metode:
+`api-key` (OpenAI) dan **`chat-gpt`** — jalur langganan yang memang kamu inginkan.
+Aplikasi harus mengimplementasikan method `authenticate` ACP dan membiarkan pengguna
+memilih. Bandingkan dengan Claude yang mengembalikan `authMethods: []` karena sudah
+terautentikasi. **Kedua agen butuh alur auth yang berbeda di UI** — Codex meminta
+pilihan eksplisit, Claude tidak.
+
+## Perbedaan antar-adapter yang mengikat Rencana 2
+
+| | `codex-acp` 1.1.9 | `claude-agent-acp` 0.64.2 |
+|---|---|---|
+| `authMethods` | `api-key`, `chat-gpt` | `[]` (sudah terautentikasi) |
+| MCP stdio | ya, varian tanpa `type` | ya, varian tanpa `type` |
+| MCP http | ya | ya |
+| MCP sse | **tidak** | ya |
+| MCP varian `acp` | ya (`serverId`) | tidak |
+| `promptCapabilities.image` | ya | ya |
+| `sessionCapabilities.fork` | tidak | ya |
+| `resume`/`list`/`close`/`delete` | ya | ya |
+
+**ATURAN WAJIB UNTUK KLIEN RUST — berlaku di kedua adapter.**
+Untuk server MCP stdio, **hilangkan field `type`**. Itu satu-satunya bentuk yang
+diterima keduanya, dan keduanya **membuang entri yang tidak cocok tanpa error**:
+
+- Claude: cabang `else if (!("type" in server))` di `dist/acp-agent.js` — mengirim
+  `type: "stdio"` eksplisit membuat entri tidak cocok cabang mana pun.
+- Codex: `zMcpServer` adalah union di mana varian stdio **tidak** punya literal `type`,
+  dan field-nya divalidasi dengan `vecSkipError` — entri yang gagal divalidasi dilewati
+  diam-diam.
+
+Konsekuensinya sama di kedua sisi: `session/new` tetap sukses, agen berjalan tanpa satu
+pun tool Midscene, dan tidak ada yang melapor. **Rencana 2 wajib punya test integrasi
+yang menegaskan tool Midscene benar-benar muncul di sesi** — jangan pernah menyimpulkan
+dari `session/new` yang tidak error.
+
+Skema stdio Codex juga menuntut `args` dan `env` sebagai array **wajib**, bukan opsional.
+Kirim array kosong, jangan hilangkan field-nya.
 
 - [ ] **Step 2: Install Claude Code ACP adapter dan periksa dukungan `mcpServers`**
 
