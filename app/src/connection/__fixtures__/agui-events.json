@@ -11,10 +11,22 @@
     "delta": "Perlu membuka halamannya dulu."
   },
   {
+    "type": "TEXT_MESSAGE_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "msg-run-fikstur"
+  },
+  {
     "type": "TEXT_MESSAGE_CONTENT",
     "runId": "run-fikstur",
     "threadId": "thread-fikstur",
     "delta": "Baik, "
+  },
+  {
+    "type": "TEXT_MESSAGE_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "msg-run-fikstur"
   },
   {
     "type": "TEXT_MESSAGE_CONTENT",
@@ -43,10 +55,48 @@
     "toolCallId": "call-1"
   },
   {
+    "type": "TEXT_MESSAGE_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "msg-run-fikstur"
+  },
+  {
     "type": "TEXT_MESSAGE_CONTENT",
     "runId": "run-fikstur",
     "threadId": "thread-fikstur",
     "delta": " Halamannya sudah terbuka."
+  },
+  {
+    "type": "TOOL_CALL_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-2",
+    "toolCallName": "mcp__midscene__query"
+  },
+  {
+    "type": "TOOL_CALL_ARGS",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-2",
+    "delta": "{\"query\":\"judul halaman\"}"
+  },
+  {
+    "type": "TOOL_CALL_END",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-2"
+  },
+  {
+    "type": "TEXT_MESSAGE_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "msg-run-fikstur"
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "delta": " Judulnya \"Masuk\"."
   },
   {
     "type": "RUN_FINISHED",

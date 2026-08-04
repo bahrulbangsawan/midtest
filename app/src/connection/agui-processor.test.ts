@@ -59,10 +59,13 @@ test('event dari events.rs jadi pesan asisten lewat StreamProcessor sungguhan', 
   const processor = proses(eventDariRust());
   const messages = processor.getMessages();
 
-  // Gerbangnya. Dengan `TEXT_MESSAGE_CHUNK` /
-  // `THINKING_TEXT_MESSAGE_CONTENT` (nama yang dipakai sebelum perbaikan
-  // ini) baris ini gagal dengan `messages` berisi nol elemen: setiap kata
-  // asisten dibuang sebelum sempat dirender.
+  // Satu giliran = satu pesan asisten.
+  //
+  // Catatan tentang bagaimana test ini gagal ketika nama event salah: yang
+  // jatuh **bukan** baris ini. `TOOL_CALL_START` tetap membuat pesan
+  // asistennya, jadi `messages` tetap berisi satu elemen; yang kosong adalah
+  // isinya — `parts` hanya memuat bagian `tool-call`. Assertion pertama yang
+  // merah adalah `pemikiran` di bawah. (Diverifikasi, bukan diperkirakan.)
   expect(messages).toHaveLength(1);
   expect(messages[0].role).toBe('assistant');
 
@@ -77,29 +80,64 @@ test('event dari events.rs jadi pesan asisten lewat StreamProcessor sungguhan', 
   });
 
   // `text` — kata-kata asisten, digabung dari beberapa delta.
+  //
+  // Tiga rentang teks yang dipisahkan dua tool call, dan **setiap rentang
+  // hanya memuat isinya sendiri**. Inilah assertion yang menahan cacat
+  // pengulangan: tanpa `TEXT_MESSAGE_START` ber-`messageId` dari
+  // `agui_text_chunk`, rentang kedua berbunyi
+  // `"Baik, saya buka halamannya. Halamannya sudah terbuka."` dan rentang
+  // ketiga mengulang seluruh narasi giliran. Skenario fikstur sengaja
+  // memakai dua tool call, bukan satu, karena pengulangannya bertumpuk —
+  // satu tool call hanya menunjukkan separuh gejalanya.
   const teks = bagian.filter((b) => b.type === 'text');
-  expect(teks.length).toBeGreaterThan(0);
-  expect(teks[0]).toMatchObject({
-    type: 'text',
-    content: 'Baik, saya buka halamannya.',
-  });
+  expect(teks.map((b) => b.content)).toEqual([
+    'Baik, saya buka halamannya.',
+    ' Halamannya sudah terbuka.',
+    ' Judulnya "Masuk".',
+  ]);
+
+  // Dinyatakan sekali lagi sebagai larangan yang eksplisit, supaya niatnya
+  // tidak hilang kalau kalimat fiksturnya berubah nanti: tidak boleh ada
+  // rentang teks selain yang pertama yang memuat ulang isi rentang pertama.
+  for (const potongan of teks.slice(1)) {
+    expect(potongan.content).not.toContain('Baik, saya buka halamannya.');
+  }
 
   // `tool-call` — satu-satunya bagian yang sudah bekerja sebelum perbaikan
-  // ini, karena `TOOL_CALL_*` kebetulan sudah bernama benar. Diikutkan
-  // supaya test ini gagal juga bila perbaikan nama teks merusak jalur tool.
+  // nama event, karena `TOOL_CALL_*` kebetulan sudah bernama benar.
+  // Diikutkan supaya test ini gagal juga bila perbaikan di jalur teks
+  // merusak jalur tool.
   const alat = bagian.filter((b) => b.type === 'tool-call');
-  expect(alat).toHaveLength(1);
+  expect(alat).toHaveLength(2);
   expect(alat[0]).toMatchObject({
     type: 'tool-call',
     id: 'call-1',
     name: 'mcp__midscene__act',
     input: { instruction: 'klik tombol Masuk' },
   });
+  expect(alat[1]).toMatchObject({
+    type: 'tool-call',
+    id: 'call-2',
+    name: 'mcp__midscene__query',
+    input: { query: 'judul halaman' },
+  });
+
+  // Urutan bagian sebagaimana `Chat.tsx` akan merendernya, dari atas ke
+  // bawah. Bagian teks yang benar tetapi tersusun salah tetap salah di mata
+  // pengguna.
+  expect(bagian.map((b) => b.type)).toEqual([
+    'thinking',
+    'text',
+    'tool-call',
+    'text',
+    'tool-call',
+    'text',
+  ]);
 
   // Agregat yang sama, dibaca lewat jalur `getState()` — `getResult()`
   // privat di tipe yang dipublikasikan pustakanya.
   expect(processor.getState()).toMatchObject({
-    content: 'Baik, saya buka halamannya. Halamannya sudah terbuka.',
+    content: 'Baik, saya buka halamannya. Halamannya sudah terbuka. Judulnya "Masuk".',
     thinking: 'Perlu membuka halamannya dulu.',
   });
 });

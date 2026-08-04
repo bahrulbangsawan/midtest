@@ -63,11 +63,67 @@ pub fn agui_run_error(run_id: &str, thread_id: &str, message: &str) -> Value {
 /// `TEXT_MESSAGE_CHUNK` adalah salah satunya, jadi setiap kata asisten hilang
 /// tanpa jejak sementara tool call tetap muncul.
 ///
-/// `TEXT_MESSAGE_CONTENT` tidak memerlukan `TEXT_MESSAGE_START` lebih dulu:
-/// `handleTextMessageContentEvent` memanggil `ensureAssistantMessage(undefined)`
-/// dan membuat pesan asistennya sendiri bila belum ada.
-pub fn agui_text_chunk(run_id: &str, thread_id: &str, delta: &str) -> Value {
-    json!({ "type": "TEXT_MESSAGE_CONTENT", "runId": run_id, "threadId": thread_id, "delta": delta })
+/// Setiap potongan didahului `TEXT_MESSAGE_START` yang membawa `messageId`
+/// tetap, dan itu bukan formalitas protokol melainkan perbaikan bug yang
+/// terlihat pengguna.
+///
+/// `TEXT_MESSAGE_CONTENT` sendiri memang tidak mensyaratkan `START`
+/// (`handleTextMessageContentEvent` memanggil `ensureAssistantMessage(undefined)`
+/// dan membuat pesan asistennya sendiri). Tanpa `START`, teks setelah sebuah
+/// tool call **mengulang seluruh narasi sebelumnya**, dan pengulangannya
+/// bertumpuk pada setiap tool call berikutnya:
+///
+/// ```text
+/// text "Satu. " / tool / text "Satu. Dua. " / tool / text "Satu. Dua. Tiga."
+/// ```
+///
+/// Untuk agen Midscene yang lazim memanggil beberapa tool dalam satu giliran,
+/// blok terakhir jadi mengulang percakapan sepanjang giliran itu.
+///
+/// Sebabnya: `handleTextMessageContentEvent` hanya memulai segmen teks baru
+/// bila `isNewTextSegment()` benar, dan fungsi itu (`processor.js:1212-1222`)
+/// mengembalikan `false` tanpa syarat untuk chunk yang hanya membawa `delta`
+/// tanpa `content` — bentuk yang kita kirim. Karena bagian terakhir pesannya
+/// saat itu bertipe `tool-call`, `updateTextPart` **menambah** bagian teks
+/// baru alih-alih mengganti, dan isinya adalah seluruh segmen terakumulasi.
+///
+/// Dua jalan buntu yang sudah dicoba dan gagal, dicatat supaya tidak dicoba
+/// lagi:
+///
+/// - `messageId` pada `TEXT_MESSAGE_CONTENT` saja **tidak** memperbaiki apa
+///   pun. Logika segmennya tidak pernah membacanya.
+/// - `TEXT_MESSAGE_START` **tanpa** `messageId` justru merusak lebih parah:
+///   `ensureAssistantMessage` membuat pesan baru setiap kali, hasilnya empat
+///   pesan terpisah dan agregat `thinking` yang hilang sama sekali.
+///
+/// Yang bekerja: `START` dengan `messageId` tetap. `handleTextMessageStartEvent`
+/// (`processor.js:511-518`) me-reset `currentSegmentText`/`lastEmittedText`
+/// **hanya** ketika `hasToolCallsSinceTextStart` bernilai benar, dan tidak
+/// melakukan apa-apa selain itu. Sifat "no-op di luar posisi pasca-tool-call"
+/// itulah yang membuat fungsi ini boleh tetap tanpa state: `START` aman
+/// dikirim mendahului **setiap** potongan, termasuk berkali-kali di tengah
+/// satu rentang teks, tanpa memecah akumulasinya. Diverifikasi terhadap
+/// `StreamProcessor` terpasang dengan rentang teks multi-delta, bukan hanya
+/// satu delta per rentang.
+///
+/// `messageId`-nya diturunkan dari `run_id` sehingga tetap selama satu giliran
+/// dan berganti pada giliran berikutnya — satu giliran, satu pesan asisten.
+/// `TEXT_MESSAGE_END` tidak diperlukan dan tidak dikirim.
+pub fn agui_text_chunk(run_id: &str, thread_id: &str, delta: &str) -> Vec<Value> {
+    vec![
+        json!({ "type": "TEXT_MESSAGE_START", "runId": run_id, "threadId": thread_id,
+                "messageId": text_message_id(run_id) }),
+        json!({ "type": "TEXT_MESSAGE_CONTENT", "runId": run_id, "threadId": thread_id,
+                "delta": delta }),
+    ]
+}
+
+/// Identitas pesan asisten untuk satu giliran.
+///
+/// Wajib ada dan wajib tetap sepanjang giliran — lihat [`agui_text_chunk`]
+/// untuk apa yang terjadi bila tidak.
+fn text_message_id(run_id: &str) -> String {
+    format!("msg-{run_id}")
 }
 
 pub fn agui_tool_call_start(
@@ -111,7 +167,7 @@ pub fn agui_thinking_chunk(run_id: &str, thread_id: &str, delta: &str) -> Value 
 pub fn to_agui(update: &SessionUpdate, run_id: &str, thread_id: &str) -> Vec<Value> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-            ContentBlock::Text(text) => vec![agui_text_chunk(run_id, thread_id, &text.text)],
+            ContentBlock::Text(text) => agui_text_chunk(run_id, thread_id, &text.text),
             _ => vec![],
         },
         SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
@@ -148,10 +204,26 @@ mod tests {
     #[test]
     fn potongan_pesan_agen_jadi_text_message_content() {
         let ev = agui_text_chunk("r1", "t1", "halo");
-        assert_eq!(ev["type"], "TEXT_MESSAGE_CONTENT");
-        assert_eq!(ev["delta"], "halo");
-        assert_eq!(ev["runId"], "r1");
-        assert_eq!(ev["threadId"], "t1");
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0]["type"], "TEXT_MESSAGE_START");
+        assert_eq!(ev[0]["messageId"], "msg-r1");
+        assert_eq!(ev[1]["type"], "TEXT_MESSAGE_CONTENT");
+        assert_eq!(ev[1]["delta"], "halo");
+        assert_eq!(ev[1]["runId"], "r1");
+        assert_eq!(ev[1]["threadId"], "t1");
+    }
+
+    /// `messageId` harus tetap selama satu giliran dan berganti pada giliran
+    /// berikutnya. Yang pertama menjaga seluruh giliran jadi satu pesan
+    /// asisten; yang kedua menjaga giliran baru tidak menempel ke pesan lama.
+    #[test]
+    fn message_id_tetap_dalam_satu_run_dan_berganti_antar_run() {
+        let pertama = agui_text_chunk("r1", "t1", "satu");
+        let kedua = agui_text_chunk("r1", "t1", "dua");
+        assert_eq!(pertama[0]["messageId"], kedua[0]["messageId"]);
+
+        let giliran_lain = agui_text_chunk("r2", "t1", "tiga");
+        assert_ne!(pertama[0]["messageId"], giliran_lain[0]["messageId"]);
     }
 
     #[test]
@@ -196,9 +268,11 @@ mod tests {
             "halo dari agen",
         )));
         let events = to_agui(&update, "r1", "t1");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["type"], "TEXT_MESSAGE_CONTENT");
-        assert_eq!(events[0]["delta"], "halo dari agen");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "TEXT_MESSAGE_START");
+        assert_eq!(events[0]["messageId"], "msg-r1");
+        assert_eq!(events[1]["type"], "TEXT_MESSAGE_CONTENT");
+        assert_eq!(events[1]["delta"], "halo dari agen");
     }
 
     #[test]
@@ -334,6 +408,23 @@ mod tests {
             )),
             SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
                 " Halamannya sudah terbuka.",
+            ))),
+            // Tool call kedua, dan teks sesudahnya. Bukan hiasan: cacat
+            // pengulangan teks yang diperbaiki `agui_text_chunk` **bertumpuk**
+            // — satu tool call hanya menggandakan kalimat pertama, dua tool
+            // call membuat blok terakhir mengulang seluruh narasi giliran.
+            // Agen Midscene lazim memanggil beberapa tool per giliran, jadi
+            // bentuk inilah yang akan dilihat pengguna lebih dulu.
+            SessionUpdate::ToolCall(
+                ToolCall::new("call-2", "mcp__midscene__query")
+                    .raw_input(json!({ "query": "judul halaman" })),
+            ),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "call-2",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
+                " Judulnya \"Masuk\".",
             ))),
         ];
 

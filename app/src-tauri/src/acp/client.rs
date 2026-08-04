@@ -802,7 +802,16 @@ mod tests {
             ContentBlock::from("halo"),
         )));
 
-        let (nama, payload) = events.recv().await.expect("harus ada satu event");
+        // Satu potongan teks = dua event: `TEXT_MESSAGE_START` yang membawa
+        // identitas pesan, lalu isinya. Keduanya harus benar-benar sampai ke
+        // webview dan dalam urutan itu — `START` yang tertinggal di sisi Rust
+        // mengembalikan cacat pengulangan teks pasca-tool-call.
+        let (nama, awal) = events.recv().await.expect("harus ada event pembuka");
+        assert_eq!(nama, EVENT_AGUI);
+        assert_eq!(awal["type"], "TEXT_MESSAGE_START");
+        assert_eq!(awal["messageId"], format!("msg-{run_id}"));
+
+        let (nama, payload) = events.recv().await.expect("harus ada event isi");
         assert_eq!(nama, EVENT_AGUI);
         assert_eq!(payload["type"], "TEXT_MESSAGE_CONTENT");
         assert_eq!(payload["delta"], "halo");
@@ -834,6 +843,11 @@ mod tests {
         let mut agen = FakeAgent::start(&ctx, events).await;
 
         agen.send_notification("session/update", potongan_teks("teks dari agen"));
+
+        let (nama, awal) = agen.next_event().await;
+        assert_eq!(nama, EVENT_AGUI);
+        assert_eq!(awal["type"], "TEXT_MESSAGE_START");
+        assert_eq!(awal["messageId"], format!("msg-{run_id}"));
 
         let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGUI);
@@ -1031,6 +1045,10 @@ mod tests {
         let request_id = payload["requestId"].as_str().unwrap().to_owned();
 
         agen.send_notification("session/update", potongan_teks("sambil jalan"));
+
+        let (nama, awal) = agen.next_event().await;
+        assert_eq!(nama, EVENT_AGUI);
+        assert_eq!(awal["type"], "TEXT_MESSAGE_START");
 
         let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGUI);
