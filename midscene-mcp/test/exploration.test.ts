@@ -67,6 +67,15 @@ test('act berhenti dengan BUDGET_EXCEEDED saat batas tercapai', async () => {
   assert.match((hasil.content as any)[0].text, /BUDGET_EXCEEDED/);
 });
 
+test('act yang melampaui budget tidak meneruskan operasi ke device', async () => {
+  const { client, dibuat } = await hubungkan(1);
+  await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
+  await client.callTool({ name: 'act', arguments: { instruction: 'pertama' } });
+  const jumlahSebelum = dibuat[0].calls.length;
+  await client.callTool({ name: 'act', arguments: { instruction: 'kedua' } });
+  assert.equal(dibuat[0].calls.length, jumlahSebelum, 'device tidak boleh menerima panggilan tambahan setelah budget habis');
+});
+
 test('query mengembalikan hasil sebagai JSON', async () => {
   const { client, dibuat } = await hubungkan();
   await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
@@ -93,6 +102,15 @@ test('galat device dibungkus sebagai DEVICE_FAILED', async () => {
   const hasil = await client.callTool({ name: 'act', arguments: { instruction: 'klik hantu' } });
   assert.equal(hasil.isError, true);
   assert.match((hasil.content as any)[0].text, /DEVICE_FAILED/);
+});
+
+test('galat device tetap memotong budget secara permanen', async () => {
+  const { client, dibuat } = await hubungkan(5);
+  await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
+  dibuat[0].failNext = 'elemen tidak ditemukan';
+  await client.callTool({ name: 'act', arguments: { instruction: 'klik hantu' } });
+  const setelah = await client.callTool({ name: 'act', arguments: { instruction: 'klik lagi' } });
+  assert.match((setelah.content as any)[0].text, /Budget used: 2 of 5/);
 });
 
 test('end_session menutup device', async () => {

@@ -5,6 +5,9 @@ import { SessionManager } from './session.ts';
 import { FakeDevice } from './devices/fake.ts';
 
 // TODO(Task 9): swap FakeDevice for real web/computer device adapters.
+console.error(
+  '[midscene-mcp] WARNING: no real device adapters wired yet (Task 9 pending) — all automation is simulated.',
+);
 const sessions = new SessionManager(async (target) => new FakeDevice(target));
 
 const server = createServer({ sessions });
