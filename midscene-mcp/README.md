@@ -178,6 +178,14 @@ seluruh langkah `flow` di semua task, lalu memotong sebanyak itu di muka:
   Tulis alurnya sebagai langkah eksplisit (`ai`, `aiAssert`, `aiWaitFor`)
   seperti yang memang dihasilkan tool eksplorasi; masing-masing dihitung,
   ditagih, dan kena cache.
+- `flow` yang ditulis sebagai **mapping** (atau string, atau dibiarkan
+  kosong) ditolak juga (`SCENARIO_UNSUPPORTED`), sebelum sesi dibuka.
+  `parseYamlScript` memvalidasi `tasks` harus array tapi tidak pernah
+  memeriksa `flow`, sementara Midscene menelusurinya dengan
+  `for (const flowItemIndex in flow)` — jadi mapping tetap dijalankan
+  seperti sequence biasa. Menganggap bentuk non-array sebagai "nol langkah"
+  berarti seluruh isinya lolos tanpa dihitung dan tanpa diperiksa. `flow`
+  harus berupa sequence: satu entri `- ` per langkah.
 - Hasil yang sukses melaporkan potongannya: `Charged N of LIMIT AI
   operations.`
 

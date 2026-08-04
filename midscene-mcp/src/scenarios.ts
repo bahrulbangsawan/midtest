@@ -32,16 +32,77 @@ export function hitungLangkahSkenario(yaml: string): number {
       }`,
     );
   }
+  // `parseYamlScript` itself enforces that `tasks` is an array ("property \"tasks\" must
+  // be an array in yaml script"), and `ScriptPlayer` calls `.map` on it, so a non-array
+  // `tasks` cannot reach a single AI call. `flow` gets neither guarantee — see below.
   const tasks = Array.isArray(skrip?.tasks) ? skrip.tasks : [];
   let jumlah = 0;
   for (const [iTask, task] of tasks.entries()) {
-    const flow = Array.isArray(task?.flow) ? task.flow : [];
-    for (const [iLangkah, langkah] of flow.entries()) {
+    const flow = task?.flow;
+    // A task with no `flow` at all cannot run: `playTask` opens with
+    // `assert(flow, 'missing flow in task')`, which throws before any AI call.
+    if (flow === undefined) continue;
+    tolakBentukFlow(flow, iTask);
+    for (const [iLangkah, langkah] of (flow as unknown[]).entries()) {
       tolakLangkahTakTerbatas(langkah, iTask, iLangkah);
     }
-    jumlah += flow.length;
+    jumlah += (flow as unknown[]).length;
   }
   return jumlah;
+}
+
+/**
+ * Refuse a `flow` that is present but is not a sequence.
+ *
+ * This closes a bypass that a `flow`-is-an-array assumption left wide open. Written as a
+ * YAML *mapping* rather than a sequence:
+ *
+ * ```yaml
+ * tasks:
+ *   - name: t
+ *     flow:
+ *       s1:
+ *         runGherkinScenario: |
+ *           Given ...
+ * ```
+ *
+ * `parseYamlScript` accepts it (it validates `tasks` is an array but never checks
+ * `flow`), and Midscene runs it: `playTask` does `assert(flow, ...)` — a non-empty object
+ * is truthy — then `for (const flowItemIndex in flow)` at `yaml/player.mjs:115`. `for…in`
+ * walks object keys, so every value is dispatched exactly as a sequence entry would be.
+ * Meanwhile a guard that did `Array.isArray(task.flow) ? task.flow : []` skipped the
+ * whole thing, counted 0, and never inspected a single item — so a Gherkin step hidden in
+ * a mapping ran unbounded and uncached at a charge of zero.
+ *
+ * **Rejecting outright, rather than iterating the mapping's values through the same
+ * per-item checks.** Both would close today's hole, but only rejection is stable:
+ *
+ * - `MidsceneYamlTask.flow` is declared `MidsceneYamlFlowItem[]`. A mapping works purely
+ *   by accident of `for…in`, against the package's own declared type.
+ * - Iterating would mean maintaining an emulation of that accident. If Midscene ever
+ *   changes how it walks a non-array `flow`, our count silently drifts again — the exact
+ *   failure mode being fixed here, reintroduced one layer down.
+ * - Nothing in this server emits a mapping-shaped flow; the exploration tools produce
+ *   sequences. Refusing costs real usage nothing.
+ *
+ * Rejection cannot drift, because an unsupported shape never reaches the runner at all.
+ */
+function bentukFlow(flow: unknown): string {
+  if (flow === null) return 'an empty value';
+  return typeof flow === 'object' ? 'a mapping' : `a ${typeof flow}`;
+}
+
+function tolakBentukFlow(flow: unknown, iTask: number): void {
+  if (Array.isArray(flow)) return;
+  throw new ToolError(
+    'SCENARIO_UNSUPPORTED',
+    `task ${iTask + 1} writes "flow" as ${bentukFlow(flow)}, ` +
+      'not a list of steps. Midscene still executes some of these shapes (a mapping is ' +
+      'walked with for-in), so they cannot be left uncounted, and their cost cannot be ' +
+      'bounded reliably. Write flow as a YAML sequence — one "- " entry per step, e.g. ' +
+      '"flow:\\n  - ai: click sign in\\n  - aiAssert: the dashboard is visible" — which is ' +
+      'the shape the exploration tools already produce.',
+  );
 }
 
 /**

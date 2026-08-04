@@ -231,6 +231,126 @@ test('run_scenario menjalankan skenario pasangannya yang tanpa gherkin', async (
   assert.equal(dibuat.length, 1);
 });
 
+// --- flow yang ditulis sebagai mapping, bukan sequence ---
+
+/**
+ * Bypass yang lolos dari versi pertama penjaga ini. `parseYamlScript` menerimanya
+ * (ia memvalidasi `tasks` harus array, tapi `flow` tidak pernah dicek), dan Midscene
+ * menjalankannya: `playTask` melakukan `assert(flow)` — objek non-kosong itu truthy —
+ * lalu `for (const flowItemIndex in flow)` di `player.mjs:115`. `for…in` menelusuri
+ * kunci objek, jadi setiap nilainya di-dispatch seperti entri sequence biasa.
+ */
+const YAML_FLOW_MAPPING =
+  'tasks:\n  - name: t\n    flow:\n      s1:\n        runGherkinScenario: |\n          Given saya di beranda\n          When saya klik masuk\n';
+const YAML_FLOW_MAPPING_TANPA_GHERKIN =
+  'tasks:\n  - name: t\n    flow:\n      s1:\n        ai: satu\n      s2:\n        ai: dua\n';
+
+test('flow berbentuk mapping ditolak, bukan dihitung nol langkah', () => {
+  let galat: ToolError | undefined;
+  try {
+    hitungLangkahSkenario(YAML_FLOW_MAPPING);
+  } catch (err) {
+    galat = err as ToolError;
+  }
+  assert.ok(galat, 'harus melempar — dulu bentuk ini dihitung 0 dan tidak pernah diperiksa');
+  assert.equal(galat.code, 'SCENARIO_UNSUPPORTED');
+  assert.match(galat.message, /task 1/);
+  assert.match(galat.message, /not a list of steps/);
+  assert.match(galat.message, /YAML sequence/, 'sebutkan bentuk pengganti yang benar');
+});
+
+test('flow mapping ditolak walau isinya tidak mengandung gherkin sama sekali', () => {
+  // Penolakan berlaku pada bentuknya, bukan pada isinya: kalau hanya isi yang dicek,
+  // bentuk mapping tetap jadi jalur yang biayanya tidak terhitung.
+  assert.throws(
+    () => hitungLangkahSkenario(YAML_FLOW_MAPPING_TANPA_GHERKIN),
+    (err: ToolError) => err.code === 'SCENARIO_UNSUPPORTED',
+  );
+});
+
+test('flow berbentuk string atau nilai kosong juga ditolak', () => {
+  for (const rusak of [
+    'tasks:\n  - name: t\n    flow: halo\n',
+    'tasks:\n  - name: t\n    flow:\n',
+  ]) {
+    assert.throws(
+      () => hitungLangkahSkenario(rusak),
+      (err: ToolError) => err.code === 'SCENARIO_UNSUPPORTED',
+      `bentuk ${JSON.stringify(rusak)} harus ditolak`,
+    );
+  }
+});
+
+test('task tanpa flow sama sekali tetap dihitung nol, bukan ditolak', () => {
+  // Beda dari bentuk yang salah: `playTask` membuka dengan
+  // `assert(flow, 'missing flow in task')`, jadi task tanpa flow tidak bisa
+  // menjalankan satu pun panggilan AI.
+  assert.equal(hitungLangkahSkenario('tasks:\n  - name: a\n'), 0);
+});
+
+test('run_scenario menolak flow mapping tanpa pernah membuka sesi', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore();
+  await store.save('mapping', YAML_FLOW_MAPPING);
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'mapping', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /SCENARIO_UNSUPPORTED/);
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser atau desktop yang dibuka');
+});
+
+test('flow sequence yang setara tetap lolos dan dihitung seperti sebelumnya', () => {
+  // Kontrol: isi yang sama persis, hanya ditulis sebagai sequence.
+  assert.equal(hitungLangkahSkenario('tasks:\n  - name: t\n    flow:\n      - ai: satu\n      - ai: dua\n'), 2);
+  assert.equal(hitungLangkahSkenario(YAML_TANPA_GHERKIN), 2);
+  assert.equal(hitungLangkahSkenario('tasks: []\n'), 0);
+});
+
+/**
+ * Kanari upgrade. Dependensi memakai rentang caret (`@midscene/core` lewat
+ * `@midscene/web@^1.10.8`), jadi bump minor bisa menambah cabang dispatch baru di
+ * `playFlowItem` tanpa satu pun tes lain berubah — dan cabang baru yang biayanya tak
+ * terbatas akan membuka kembali persis lubang yang baru saja ditutup, diam-diam.
+ *
+ * Tes ini membaca nama cabang `'X' in flowItem` langsung dari `player.mjs` terpasang dan
+ * mencocokkannya dengan himpunan yang sudah dipatok. Kalau Midscene menambah atau
+ * mengganti cabang, tes ini gagal dan memaksa manusia memutuskan: apakah kunci baru itu
+ * bisa dihitung, atau harus masuk `LANGKAH_TAK_TERBATAS`?
+ *
+ * Ini SENGAJA bukan tes perilaku — ia tidak menjalankan Midscene. Ia detektor perubahan.
+ */
+test('KANARI: cabang dispatch playFlowItem masih sama seperti saat penjaga ini ditulis', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const player = join(
+    import.meta.dirname, '..', 'node_modules', '@midscene', 'core', 'dist', 'es', 'yaml', 'player.mjs',
+  );
+  const sumber = await readFile(player, 'utf8');
+
+  // Kutipnya bisa tunggal ATAU ganda — `"javascript" in flowItem` memakai kutip ganda,
+  // dan `flowItem` harus dicocokkan utuh supaya `flowItemRecord` ('Finalize') tidak ikut.
+  const ditemukan = [
+    ...sumber.matchAll(/['"]([A-Za-z0-9_]+)['"]\s+in\s+flowItem(?![A-Za-z0-9_])/g),
+  ].map((m) => m[1]);
+  const aktual = [...new Set(ditemukan)].sort();
+
+  const DIPATOK = [
+    'ai', 'aiAct', 'aiAction', 'aiAssert', 'aiInput', 'aiKeyboardPress', 'aiScroll',
+    'aiTap', 'aiWaitFor', 'javascript', 'logScreenshot', 'recordToReport',
+    'runGherkinScenario', 'sleep',
+  ].sort();
+
+  assert.ok(aktual.length > 0, 'regex kanari tidak cocok apa pun — kemungkinan besar tes ini yang rusak, bukan Midscene');
+  assert.deepEqual(
+    aktual,
+    DIPATOK,
+    'Cabang dispatch YAML Midscene berubah. Tinjau setiap kunci baru: bisakah biayanya ' +
+      'dihitung di muka? Kalau tidak (mengembang tak terbatas, atau berjalan dengan ' +
+      'cacheable: false), tambahkan ke LANGKAH_TAK_TERBATAS di src/scenarios.ts. ' +
+      'Baru setelah itu perbarui daftar DIPATOK ini.',
+  );
+});
+
 test('run_scenario memotong budget sebanyak langkah skenario', async () => {
   const { client, store } = await hubungkanDenganStore({ limit: 10 });
   await store.save('checkout', yamlDenganLangkah(3));
