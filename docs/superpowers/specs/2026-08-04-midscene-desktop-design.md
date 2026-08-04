@@ -83,7 +83,7 @@ Pembagian permukaan tool MCP di bawah mengikuti struktur ini secara langsung.
 │        ▲ event AG-UI          │
 │  ──────┼──────────────────    │
 │  Rust core                    │
-│   • ACP client (stdio)  ──────┼──▶ codex acp │ claude-code-acp
+│   • ACP client (stdio)  ──────┼──▶ codex acp │ claude-agent-acp
 │   • lifecycle sidecar   ──────┼──▶ Midscene MCP server (Node)
 │   • gerbang izin              │         │
 └───────────────────────────────┘         ▼
@@ -209,7 +209,7 @@ draf; pengguna memegang kata akhir.
 
 ## Penanganan galat
 
-**Prasyarat hilang** (`codex`, `claude-code-acp`, Node, Chrome). Diperiksa saat
+**Prasyarat hilang** (`codex`, `claude-agent-acp`, Node, Chrome). Diperiksa saat
 aplikasi start, ditampilkan sebagai panel prasyarat dengan instruksi install,
 bukan crash.
 
@@ -291,7 +291,7 @@ Empat asumsi yang belum terbukti pada mesin pengembangan saat ini. Keempatnya
 menjadi langkah pertama rencana implementasi.
 
 1. Versi Codex mana yang memiliki mode ACP native, dan bagaimana cara memanggilnya
-2. Apakah `claude-code-acp` mendukung parameter `mcpServers` pada `session/new`
+2. Apakah `claude-agent-acp` mendukung parameter `mcpServers` pada `session/new`
 3. Bentuk API connection kustom TanStack AI di luar helper mock-nya
 4. Apakah `@midscene/computer` v1.10.8 mengekspos `ScriptPlayer`/`runYaml` sebagai
    API publik atau hanya internal
@@ -304,6 +304,6 @@ Jika nomor 4 gagal, mode replay harus dibangun di atas API agent biasa dengan
 
 Terpasang: Node v26.5.1, Chrome (lewat `PUPPETEER_EXECUTABLE_PATH`).
 
-Belum terpasang: `cargo`, `tauri`, `codex`, `claude-code-acp`, `pnpm`.
+Belum terpasang: `cargo`, `tauri`, `codex`, `claude-agent-acp`, `pnpm`.
 
 Direktori proyek belum berupa repositori git.

@@ -41,8 +41,15 @@ Catat: versi yang terpasang, apakah ada subcommand `acp`, dan persis bagaimana m
 
 - [ ] **Step 2: Install Claude Code ACP adapter dan periksa dukungan `mcpServers`**
 
+Paket ini **berganti nama**. `@zed-industries/claude-code-acp` sudah deprecated dan
+berhenti di 0.16.2, dengan pesan resmi di registry: *"This package has been renamed to
+@agentclientprotocol/claude-agent-acp. Please migrate to continue receiving updates."*
+Nama binary-nya ikut berubah menjadi `claude-agent-acp`. Per 2026-08-04 paket baru
+sudah di 0.64.2 — selisih yang besar, jadi asumsi apa pun tentang perilaku ACP yang
+diambil dari versi lama harus diverifikasi ulang, bukan dibawa begitu saja.
+
 ```
-! npm install -g @zed-industries/claude-code-acp && claude-code-acp --version
+! npm install -g @agentclientprotocol/claude-agent-acp && claude-agent-acp --version
 ```
 
 Untuk memastikan dukungan `mcpServers` pada `session/new`, kirim handshake ACP manual:
@@ -50,7 +57,7 @@ Untuk memastikan dukungan `mcpServers` pada `session/new`, kirim handshake ACP m
 ```bash
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false}}}}' \
-  | claude-code-acp
+  | claude-agent-acp
 ```
 
 Catat balasan `initialize` secara utuh — khususnya `agentCapabilities` dan `promptCapabilities`.

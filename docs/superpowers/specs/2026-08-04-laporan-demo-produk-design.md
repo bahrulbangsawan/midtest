@@ -120,8 +120,10 @@ Urutan satu langkah:
 | 100 ms | Kursor sintetis mulai meluncur dari posisi langkah sebelumnya (800 ms) |
 | 900 ms | Penanda lingkaran memudar masuk lalu berdenyut |
 | 1200 ms | Layar "sebelum" menyilang ke layar "sesudah" (600 ms) |
-| 0–4200 ms | Zoom perlahan 1,0 → 1,09 dengan titik pusat di penanda |
 | 3000 ms | Langkah berikutnya (2000 ms untuk langkah tanpa penanda) |
+
+Tangkapan layar tidak digerakkan sama sekali — tidak ada zoom perlahan. Perbesaran
+hanya terjadi bila pengguna menekan tombol "Perbesar area".
 
 Semua durasi dibagi faktor kecepatan yang dipilih pengguna.
 
