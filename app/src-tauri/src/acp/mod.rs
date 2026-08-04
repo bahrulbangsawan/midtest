@@ -12,6 +12,7 @@
 //! * `AcpAgent` memasang `ChildGuard` yang mengirim SIGKILL ke seluruh *process
 //!   group* anak saat future koneksi di-drop, sehingga proses anak tidak bocor.
 
+pub mod auto_permission;
 pub mod client;
 pub mod events;
 pub mod session;
