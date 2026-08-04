@@ -13,8 +13,10 @@
 //!   group* anak saat future koneksi di-drop, sehingga proses anak tidak bocor.
 
 pub mod client;
+pub mod events;
 pub mod session;
 
+pub use events::to_agui;
 pub use session::{DEFAULT_SESSION_TIMEOUT, new_session, new_session_with_timeout};
 
 use std::fmt;
