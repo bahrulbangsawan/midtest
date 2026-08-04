@@ -804,7 +804,7 @@ mod tests {
 
         let (nama, payload) = events.recv().await.expect("harus ada satu event");
         assert_eq!(nama, EVENT_AGUI);
-        assert_eq!(payload["type"], "TEXT_MESSAGE_CHUNK");
+        assert_eq!(payload["type"], "TEXT_MESSAGE_CONTENT");
         assert_eq!(payload["delta"], "halo");
         assert_eq!(payload["runId"], run_id);
         assert_eq!(payload["threadId"], thread_id);
@@ -837,7 +837,7 @@ mod tests {
 
         let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGUI);
-        assert_eq!(payload["type"], "TEXT_MESSAGE_CHUNK");
+        assert_eq!(payload["type"], "TEXT_MESSAGE_CONTENT");
         assert_eq!(payload["delta"], "teks dari agen");
         assert_eq!(payload["runId"], run_id);
         assert_eq!(payload["threadId"], thread_id);

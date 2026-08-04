@@ -1,0 +1,56 @@
+[
+  {
+    "type": "RUN_STARTED",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur"
+  },
+  {
+    "type": "REASONING_MESSAGE_CONTENT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "delta": "Perlu membuka halamannya dulu."
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "delta": "Baik, "
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "delta": "saya buka halamannya."
+  },
+  {
+    "type": "TOOL_CALL_START",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-1",
+    "toolCallName": "mcp__midscene__act"
+  },
+  {
+    "type": "TOOL_CALL_ARGS",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-1",
+    "delta": "{\"instruction\":\"klik tombol Masuk\"}"
+  },
+  {
+    "type": "TOOL_CALL_END",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "toolCallId": "call-1"
+  },
+  {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "delta": " Halamannya sudah terbuka."
+  },
+  {
+    "type": "RUN_FINISHED",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur"
+  }
+]

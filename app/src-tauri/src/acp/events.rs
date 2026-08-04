@@ -1,7 +1,29 @@
 //! Terjemahkan notifikasi `session/update` ACP menjadi event AG-UI.
 //!
-//! AG-UI adalah kosakata JSON yang dipahami pustaka chat di frontend
-//! (`@ag-ui/core`). Modul ini murni penerjemah: tidak menyentuh jaringan, tidak
+//! AG-UI adalah kosakata JSON yang dipahami pustaka chat di frontend. Yang
+//! menentukan nama event di modul ini **bukan** `@ag-ui/core` — paket itu
+//! tidak terpasang di `app/` sama sekali — melainkan `switch` di
+//! `StreamProcessor::processChunk`
+//! (`@tanstack/ai/dist/esm/activities/chat/stream/processor.js`), yang hanya
+//! mengimplementasikan sebagian kosakata AG-UI dan mengabaikan sisanya tanpa
+//! error. Daftar `case` yang ada di versi terpasang (`@tanstack/ai` 0.42):
+//! `TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END`,
+//! `TOOL_CALL_START`, `TOOL_CALL_ARGS`, `TOOL_CALL_END`, `TOOL_CALL_RESULT`,
+//! `RUN_STARTED`, `RUN_FINISHED`, `RUN_ERROR`, `STEP_STARTED`,
+//! `STEP_FINISHED`, `MESSAGES_SNAPSHOT`, `CUSTOM`, `REASONING_START`,
+//! `REASONING_MESSAGE_START`, `REASONING_MESSAGE_CONTENT`,
+//! `REASONING_MESSAGE_END`, `REASONING_END`.
+//!
+//! Karena kegagalannya diam, daftar itu tidak boleh dipercaya dari ingatan.
+//! Yang menjaganya ada di `app/src/connection/agui-processor.test.ts`: test
+//! itu menyuapkan fikstur yang **dihasilkan modul ini** ke `StreamProcessor`
+//! sungguhan dan menuntut pesan asisten yang utuh keluar dari sana.
+//! Fiksturnya sendiri dikunci oleh [`tests::fikstur_agui_untuk_typescript_mutakhir`]
+//! di bawah, jadi mengganti nama event di sini tanpa memperbarui fikstur akan
+//! menggagalkan `cargo test`, dan mengganti nama ke nama yang tidak dikenal
+//! `StreamProcessor` akan menggagalkan `vitest`.
+//!
+//! Modul ini murni penerjemah: tidak menyentuh jaringan, tidak
 //! `async`, tidak menyimpan state. Itu sengaja — [`to_agui`] akan dipanggil dari
 //! closure `on_receive_notification` (Task berikutnya), yang tidak memiliki
 //! runtime async sendiri dan boleh saja dijalankan di konteks yang mensyaratkan
@@ -29,8 +51,23 @@ pub fn agui_run_error(run_id: &str, thread_id: &str, message: &str) -> Value {
     json!({ "type": "RUN_ERROR", "runId": run_id, "threadId": thread_id, "message": message })
 }
 
+/// Potongan teks pesan asisten.
+///
+/// Namanya `TEXT_MESSAGE_CONTENT`, bukan `TEXT_MESSAGE_CHUNK`. Keduanya ada di
+/// kosakata `@ag-ui/core`, tetapi yang menentukan di sini bukan `@ag-ui/core`
+/// (crate/paket itu tidak terpasang sama sekali) melainkan `switch` di
+/// `@tanstack/ai/dist/esm/activities/chat/stream/processor.js` —
+/// `StreamProcessor::processChunk`. `switch` itu hanya mengenali sebagian
+/// nama AG-UI dan **diam** untuk sisanya: event dengan `type` yang tidak
+/// punya `case` jatuh ke ujung `switch` tanpa error, tanpa log, tanpa pesan.
+/// `TEXT_MESSAGE_CHUNK` adalah salah satunya, jadi setiap kata asisten hilang
+/// tanpa jejak sementara tool call tetap muncul.
+///
+/// `TEXT_MESSAGE_CONTENT` tidak memerlukan `TEXT_MESSAGE_START` lebih dulu:
+/// `handleTextMessageContentEvent` memanggil `ensureAssistantMessage(undefined)`
+/// dan membuat pesan asistennya sendiri bila belum ada.
 pub fn agui_text_chunk(run_id: &str, thread_id: &str, delta: &str) -> Value {
-    json!({ "type": "TEXT_MESSAGE_CHUNK", "runId": run_id, "threadId": thread_id, "delta": delta })
+    json!({ "type": "TEXT_MESSAGE_CONTENT", "runId": run_id, "threadId": thread_id, "delta": delta })
 }
 
 pub fn agui_tool_call_start(
@@ -52,14 +89,16 @@ pub fn agui_tool_call_end(run_id: &str, thread_id: &str, call_id: &str) -> Value
     json!({ "type": "TOOL_CALL_END", "runId": run_id, "threadId": thread_id, "toolCallId": call_id })
 }
 
-/// Potongan pemikiran agen (bukan pesan) memakai tipe event AG-UI yang
-/// berbeda (`THINKING_TEXT_MESSAGE_CONTENT`) tetapi bentuk payload yang sama
-/// dengan [`agui_text_chunk`]. Brief tugas ini mencantumkan pemetaan ke nama
-/// event tersebut di tabel Step 4 tetapi tidak menyertakan pembangun untuk
-/// itu di blok kode Step 3 — fungsi ini mengisi kekosongan itu, mengikuti pola
-/// pembangun lain di file ini persis.
+/// Potongan pemikiran agen (bukan pesan): tipe event berbeda dari
+/// [`agui_text_chunk`], bentuk payload sama persis.
+///
+/// Namanya `REASONING_MESSAGE_CONTENT`, bukan `THINKING_TEXT_MESSAGE_CONTENT`.
+/// Alasannya sama dengan [`agui_text_chunk`]: nama yang kedua tidak punya
+/// `case` di `StreamProcessor::processChunk` dan hilang tanpa suara.
+/// `handleReasoningMessageContentEvent` menghasilkan tepat bagian
+/// `{ type: "thinking" }` yang sudah dirender `Chat.tsx`.
 pub fn agui_thinking_chunk(run_id: &str, thread_id: &str, delta: &str) -> Value {
-    json!({ "type": "THINKING_TEXT_MESSAGE_CONTENT", "runId": run_id, "threadId": thread_id, "delta": delta })
+    json!({ "type": "REASONING_MESSAGE_CONTENT", "runId": run_id, "threadId": thread_id, "delta": delta })
 }
 
 /// Terjemahkan satu [`SessionUpdate`] menjadi nol atau lebih event AG-UI.
@@ -107,9 +146,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn potongan_pesan_agen_jadi_text_message_chunk() {
+    fn potongan_pesan_agen_jadi_text_message_content() {
         let ev = agui_text_chunk("r1", "t1", "halo");
-        assert_eq!(ev["type"], "TEXT_MESSAGE_CHUNK");
+        assert_eq!(ev["type"], "TEXT_MESSAGE_CONTENT");
         assert_eq!(ev["delta"], "halo");
         assert_eq!(ev["runId"], "r1");
         assert_eq!(ev["threadId"], "t1");
@@ -150,7 +189,7 @@ mod tests {
     /// bukan hanya lolos lalu diam-diam merender bubble "thinking" untuk
     /// teks asisten biasa.
     #[test]
-    fn potongan_pesan_agen_jadi_text_message_chunk_lewat_to_agui() {
+    fn potongan_pesan_agen_jadi_text_message_content_lewat_to_agui() {
         use agent_client_protocol::schema::v1::ContentChunk;
 
         let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
@@ -158,12 +197,12 @@ mod tests {
         )));
         let events = to_agui(&update, "r1", "t1");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["type"], "TEXT_MESSAGE_CHUNK");
+        assert_eq!(events[0]["type"], "TEXT_MESSAGE_CONTENT");
         assert_eq!(events[0]["delta"], "halo dari agen");
     }
 
     #[test]
-    fn potongan_pemikiran_agen_jadi_thinking_content() {
+    fn potongan_pemikiran_agen_jadi_reasoning_content() {
         use agent_client_protocol::schema::v1::ContentChunk;
 
         let update = SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::from(
@@ -171,7 +210,7 @@ mod tests {
         )));
         let events = to_agui(&update, "r1", "t1");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["type"], "THINKING_TEXT_MESSAGE_CONTENT");
+        assert_eq!(events[0]["type"], "REASONING_MESSAGE_CONTENT");
         assert_eq!(events[0]["delta"], "menimbang opsi");
     }
 
@@ -255,5 +294,104 @@ mod tests {
 
         let update = SessionUpdate::Plan(Plan::new(vec![]));
         assert_eq!(to_agui(&update, "r1", "t1"), Vec::<Value>::new());
+    }
+
+    // ------------------------------------------------- fikstur lintas-batas
+
+    /// Di mana fikstur untuk sisi TypeScript ditulis, relatif terhadap
+    /// `app/src-tauri/`.
+    const JALUR_FIKSTUR: &str = "../src/connection/__fixtures__/agui-events.json";
+
+    /// Satu giliran lengkap seperti yang benar-benar dikirim ke webview.
+    ///
+    /// Urutannya meniru `run_turn` di `commands.rs` (`RUN_STARTED` … lalu
+    /// setiap `session/update` lewat `ClientContext::forward_update` …
+    /// lalu `RUN_FINISHED`), sehingga fikstur yang dihasilkan bukan daftar
+    /// event karangan melainkan persis apa yang mengalir di produksi.
+    fn giliran_lengkap() -> Vec<Value> {
+        use agent_client_protocol::schema::v1::{
+            ContentChunk, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
+        };
+
+        const RUN: &str = "run-fikstur";
+        const THREAD: &str = "thread-fikstur";
+
+        let pembaruan = vec![
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::from(
+                "Perlu membuka halamannya dulu.",
+            ))),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from("Baik, "))),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
+                "saya buka halamannya.",
+            ))),
+            SessionUpdate::ToolCall(
+                ToolCall::new("call-1", "mcp__midscene__act")
+                    .raw_input(json!({ "instruction": "klik tombol Masuk" })),
+            ),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "call-1",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
+                " Halamannya sudah terbuka.",
+            ))),
+        ];
+
+        let mut events = vec![agui_run_started(RUN, THREAD)];
+        for update in &pembaruan {
+            events.extend(to_agui(update, RUN, THREAD));
+        }
+        events.push(agui_run_finished(RUN, THREAD));
+        events
+    }
+
+    /// Jahitan Rust → TypeScript, dijaga dari sisi Rust.
+    ///
+    /// Fikstur di `JALUR_FIKSTUR` **dihasilkan** oleh test ini, bukan disalin
+    /// tangan; `agui-processor.test.ts` menyuapkannya ke `StreamProcessor`
+    /// sungguhan milik `@tanstack/ai`. Jadi test ini menjawab "apakah yang
+    /// dibaca TypeScript masih sama dengan yang dikirim Rust", dan test
+    /// vitest itu menjawab "apakah yang dikirim Rust masih dimengerti
+    /// pustakanya". Sebelum keduanya ada, tidak ada satu pun test yang
+    /// menyeberangi batas ini: sisi Rust hanya mencocokkan string buatannya
+    /// sendiri dengan dirinya sendiri, dan sisi vitest hanya membuktikan
+    /// adapter mengangkut apa pun yang diberikan padanya. Nama event yang
+    /// salah lolos dari keduanya, dan itu persis yang terjadi.
+    ///
+    /// Menyegarkan fikstur setelah perubahan yang disengaja:
+    /// `UPDATE_AGUI_FIXTURE=1 cargo test fikstur_agui`.
+    #[test]
+    fn fikstur_agui_untuk_typescript_mutakhir() {
+        use std::path::Path;
+
+        let jalur = Path::new(env!("CARGO_MANIFEST_DIR")).join(JALUR_FIKSTUR);
+        let mut isi = serde_json::to_string_pretty(&giliran_lengkap())
+            .expect("event AG-UI selalu bisa diserialisasi");
+        isi.push('\n');
+
+        if std::env::var_os("UPDATE_AGUI_FIXTURE").is_some() {
+            let induk = jalur.parent().expect("jalur fikstur punya direktori induk");
+            std::fs::create_dir_all(induk).expect("direktori fikstur bisa dibuat");
+            std::fs::write(&jalur, &isi).expect("fikstur bisa ditulis");
+            return;
+        }
+
+        let tersimpan = std::fs::read_to_string(&jalur).unwrap_or_else(|galat| {
+            panic!(
+                "fikstur {} tidak terbaca ({galat}). \
+                 Hasilkan ulang dengan: UPDATE_AGUI_FIXTURE=1 cargo test fikstur_agui",
+                jalur.display()
+            )
+        });
+
+        assert_eq!(
+            tersimpan,
+            isi,
+            "fikstur {} sudah basi terhadap events.rs. \
+             Sisi TypeScript membaca berkas itu untuk menguji StreamProcessor sungguhan, \
+             jadi selisih ini berarti test lintas-batas menguji event yang tidak lagi kita kirim. \
+             Hasilkan ulang dengan: UPDATE_AGUI_FIXTURE=1 cargo test fikstur_agui",
+            jalur.display()
+        );
     }
 }

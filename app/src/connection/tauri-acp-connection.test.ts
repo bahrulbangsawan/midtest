@@ -29,10 +29,10 @@ test('subscribe menghasilkan event agui yang diterima', async () => {
   const conn = createTauriAcpConnection(d);
   const iter = conn.subscribe()[Symbol.asyncIterator]();
   const berikut = iter.next();
-  d.emit({ type: 'TEXT_MESSAGE_CHUNK', delta: 'halo' });
+  d.emit({ type: 'TEXT_MESSAGE_CONTENT', delta: 'halo' });
   const hasil = await berikut;
   expect(hasil.done).toBe(false);
-  expect((hasil.value as { type: string }).type).toBe('TEXT_MESSAGE_CHUNK');
+  expect((hasil.value as { type: string }).type).toBe('TEXT_MESSAGE_CONTENT');
 });
 
 test('subscribe mendaftarkan listener sekali walau next() dipanggil berkali-kali', async () => {
@@ -41,16 +41,16 @@ test('subscribe mendaftarkan listener sekali walau next() dipanggil berkali-kali
   const iter = conn.subscribe()[Symbol.asyncIterator]();
 
   const pertama = iter.next();
-  d.emit({ type: 'TEXT_MESSAGE_CHUNK', delta: 'satu' });
-  expect((await pertama).value).toEqual({ type: 'TEXT_MESSAGE_CHUNK', delta: 'satu' });
+  d.emit({ type: 'TEXT_MESSAGE_CONTENT', delta: 'satu' });
+  expect((await pertama).value).toEqual({ type: 'TEXT_MESSAGE_CONTENT', delta: 'satu' });
 
   const kedua = iter.next();
-  d.emit({ type: 'TEXT_MESSAGE_CHUNK', delta: 'dua' });
-  expect((await kedua).value).toEqual({ type: 'TEXT_MESSAGE_CHUNK', delta: 'dua' });
+  d.emit({ type: 'TEXT_MESSAGE_CONTENT', delta: 'dua' });
+  expect((await kedua).value).toEqual({ type: 'TEXT_MESSAGE_CONTENT', delta: 'dua' });
 
   const ketiga = iter.next();
-  d.emit({ type: 'TEXT_MESSAGE_CHUNK', delta: 'tiga' });
-  expect((await ketiga).value).toEqual({ type: 'TEXT_MESSAGE_CHUNK', delta: 'tiga' });
+  d.emit({ type: 'TEXT_MESSAGE_CONTENT', delta: 'tiga' });
+  expect((await ketiga).value).toEqual({ type: 'TEXT_MESSAGE_CONTENT', delta: 'tiga' });
 
   expect(d.listen).toHaveBeenCalledTimes(1);
 });
@@ -75,7 +75,7 @@ test('abortSignal melepas listener yang sudah terdaftar sebelumnya', async () =>
 
   // Bawa listener sampai selesai terdaftar sebelum melakukan abort.
   const pertama = iter.next();
-  d.emit({ type: 'TEXT_MESSAGE_CHUNK', delta: 'halo' });
+  d.emit({ type: 'TEXT_MESSAGE_CONTENT', delta: 'halo' });
   await pertama;
 
   ac.abort();

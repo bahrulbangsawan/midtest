@@ -54,15 +54,36 @@ function App() {
     if (sudahMenyambung.current) return;
     sudahMenyambung.current = true;
 
-    let dibatalkan = false;
+    // Sengaja tanpa bendera `dibatalkan` dan tanpa fungsi cleanup, tidak
+    // seperti efek `listen` di bawahnya.
+    //
+    // Bendera semacam itu mengikat hasil sebuah promise pada umur satu
+    // *pemanggilan* efek. Di sini kepemilikannya justru bukan per-pemanggilan:
+    // ref di atas membuat `connect_agent` dipanggil tepat sekali per fiber,
+    // jadi promise-nya milik komponen, bukan milik setup yang kebetulan
+    // menembakkannya. StrictMode (setup → cleanup → setup) memutus dua hal itu
+    // dan bendera tadi menelan hasilnya: cleanup #1 membatalkan satu-satunya
+    // closure yang memegang promise, sementara setup #2 berhenti di ref dan
+    // tidak pernah memasang penerima baru. Yang tersisa: Rust sudah tersambung,
+    // sesi sudah dibuat, sidecar sudah jalan — dan jendelanya diam di
+    // "Menyambungkan…" selamanya, dengan kegagalan yang sungguhan pun tampak
+    // sama persis.
+    //
+    // Menaikkan bendera itu ke sebuah ref yang dibersihkan setup #2 juga
+    // menutup bug-nya, tapi mempertahankan pembatalan yang tidak menjaga
+    // apa-apa: sejak React 18, `setState` pada komponen yang sudah dilepas
+    // hanyalah no-op, bukan kebocoran dan bukan peringatan. Jadi yang benar di
+    // sini adalah membuang mekanismenya, bukan menambal mekanismenya.
+    //
+    // Efek `listen` di bawah tetap memakai idiom itu dan memang harus: ia tidak
+    // punya ref penjaga, jadi setup #2 memasangnya ulang — dan cleanup-nya
+    // melepas pendengar Tauri sungguhan, yang bukan no-op.
     invoke<AgentInfo>('connect_agent', { agentId: AGEN.id }).then(
       (info) => {
-        if (dibatalkan) return;
         setAgen(info);
         setStatus('tersambung');
       },
       (penyebab: unknown) => {
-        if (dibatalkan) return;
         setStatus('gagal');
         setGalat(
           `Agen ${AGEN.label} gagal disambungkan: ${String(penyebab)} ` +
@@ -70,10 +91,6 @@ function App() {
         );
       },
     );
-
-    return () => {
-      dibatalkan = true;
-    };
   }, []);
 
   useEffect(() => {
