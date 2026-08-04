@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseYamlScript, resolveWebTarget, type WebTargetConfig } from '@midscene/core/yaml';
 import { ToolError } from './errors.ts';
+import { bersihkanUrl } from './url.ts';
 
 const NAMA_SAH = /^[a-zA-Z0-9_-]+$/;
 
@@ -75,15 +76,6 @@ function uraikanSkenario(yaml: string): SkripSkenario {
  */
 function ambilUrl(skrip: SkripSkenario): string | undefined {
   return bersihkanUrl(resolveWebTarget(skrip)?.target?.url);
-}
-
-/**
- * A URL is only a URL if it has content. A blank `url:` must read as *absent* so the
- * missing-target refusal fires, rather than being handed to `page.goto('')`.
- */
-export function bersihkanUrl(url: string | undefined): string | undefined {
-  const dipangkas = url?.trim();
-  return dipangkas ? dipangkas : undefined;
 }
 
 /**

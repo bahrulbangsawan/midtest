@@ -92,7 +92,7 @@ membuat `node` gagal start bila berkasnya tidak ditemukan.
 
 | Tool | Fungsi |
 |---|---|
-| `start_session` | Membuka sesi otomasi ke target `web` (browser) atau `computer` (desktop macOS). Hanya satu sesi boleh berjalan sekaligus. |
+| `start_session` | Membuka sesi otomasi ke target `web` (browser) atau `computer` (desktop macOS). Hanya satu sesi boleh berjalan sekaligus. `url` harus absolut dan berskema (`https://…`); yang tidak sah ditolak `INVALID_URL` sebelum browser diluncurkan. |
 | `act` | Menjalankan satu aksi UI dalam bahasa natural (mis. "klik tombol masuk"). Memakai satu operasi AI dari budget. |
 | `query` | Mengekstrak data terstruktur dari layar saat ini sesuai skema yang diminta. Memakai satu operasi AI. |
 | `assert` | Memverifikasi klaim tentang layar saat ini; tool call gagal bila klaim salah. Memakai satu operasi AI. |
@@ -210,6 +210,15 @@ ke `start`.
   di halaman kosong dan setiap `aiAssert` gagal.
 - Target `computer` tidak punya alamat: `url` diabaikan dan disebutkan di hasilnya,
   persis seperti `start_session`.
+- Alamat yang tidak bisa dibuka — tanpa skema (`contoh.test`), tidak terurai sama
+  sekali, atau berskema yang tidak masuk akal untuk sesi (`mailto:`, `javascript:`) —
+  ditolak `INVALID_URL` **sebelum** browser diluncurkan. Yang diterima: `http`,
+  `https`, `file`. Kodenya ditandai *retryable*: nilainya datang dari pemanggil dan
+  bisa diperbaiki lalu dicoba lagi, jadi hasilnya berbunyi "You may retry", bukan
+  "Do not retry".
+- Pemeriksaan itu duduk di `SessionManager.start`, bukan di masing-masing handler tool,
+  karena `start_session` dan `run_scenario` sama-sama membuka sesi lewat sana — satu cek
+  untuk dua pintu, sehingga keduanya tidak bisa saling melenceng.
 
 Cache tidak mengurangi potongan ini. Cache memangkas **tagihan sungguhan**
 (langkah yang kena cache tidak memanggil VLM), sementara budget adalah

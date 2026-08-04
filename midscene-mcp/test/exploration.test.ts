@@ -72,6 +72,39 @@ test('start_session target computer mengabaikan url dan mengatakannya', async ()
   assert.match((hasil.content as any)[0].text, /url was ignored/);
 });
 
+/**
+ * Celah yang sama persis dengan yang ada di run_scenario, dan sudah ada di sini lebih
+ * dulu. Keduanya lewat `SessionManager.start`, jadi keduanya dijaga satu cek yang sama —
+ * bukan dua salinan yang bebas melenceng.
+ */
+test('start_session dengan url tidak sah ditolak sebelum browser diluncurkan', async () => {
+  const { client, dibuat, optsDiterima } = await hubungkan();
+  const hasil = await client.callTool({
+    name: 'start_session',
+    arguments: { target: 'web', url: 'rekamedika.com' },
+  });
+  assert.equal(hasil.isError, true);
+  const teks = (hasil.content as any)[0].text;
+  assert.match(teks, /INVALID_URL/);
+  assert.match(teks, /rekamedika\.com/, 'sebutkan nilai yang dikirim');
+  assert.match(teks, /needs a scheme/);
+  assert.match(teks, /https:\/\/example\.com/, 'sebutkan bentuk yang benar');
+  assert.match(teks, /You may retry/, 'bukan "Do not retry" — ini bisa dikoreksi');
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser yang diluncurkan');
+  assert.deepEqual(optsDiterima, []);
+});
+
+test('start_session dengan url sah tetap membuka sesi seperti biasa', async () => {
+  const { client, dibuat, optsDiterima } = await hubungkan();
+  const hasil = await client.callTool({
+    name: 'start_session',
+    arguments: { target: 'web', url: 'https://rekamedika.com/daftar' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.equal(dibuat.length, 1);
+  assert.deepEqual(optsDiterima, [{ url: 'https://rekamedika.com/daftar' }]);
+});
+
 test('act meneruskan instruksi ke device', async () => {
   const { client, dibuat } = await hubungkan();
   await client.callTool({ name: 'start_session', arguments: { target: 'web' } });

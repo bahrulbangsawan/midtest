@@ -2,7 +2,8 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SessionManager } from '../session.ts';
 import type { ScenarioStore } from '../scenarios.ts';
-import { analisaSkenario, bersihkanUrl } from '../scenarios.ts';
+import { analisaSkenario } from '../scenarios.ts';
+import { bersihkanUrl } from '../url.ts';
 import { ToolError, toToolResult } from '../errors.ts';
 
 export function registerScenarioTools(
@@ -59,7 +60,7 @@ export function registerScenarioTools(
           .string()
           .optional()
           .describe(
-            'Replay against this address instead of the one saved in the scenario YAML. Web target only; ignored for "computer", which has no address to open.',
+            'Replay against this address instead of the one saved in the scenario YAML. Must be absolute and include its scheme ("https://example.com", not "example.com"); http, https and file are accepted. Anything else is refused with INVALID_URL before a browser opens, and you may call again with a corrected value. Web target only; ignored for "computer", which has no address to open.',
           ),
       },
     },

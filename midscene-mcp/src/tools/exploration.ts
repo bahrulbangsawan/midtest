@@ -16,7 +16,12 @@ export function registerExplorationTools(server: McpServer, sessions: SessionMan
         'Open an automation session. Use target "web" for a browser, "computer" for the macOS desktop. Only one session may run at a time.',
       inputSchema: {
         target: z.enum(['web', 'computer']),
-        url: z.string().optional().describe('Initial URL, web target only'),
+        url: z
+          .string()
+          .optional()
+          .describe(
+            'Initial URL, web target only. Must be absolute and include its scheme ("https://example.com", not "example.com"); http, https and file are accepted. Anything else is refused with INVALID_URL before a browser opens, and you may call again with a corrected value.',
+          ),
       },
     },
     async ({ target, url }) => {

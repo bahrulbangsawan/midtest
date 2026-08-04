@@ -356,6 +356,50 @@ test('url kosong di YAML diperlakukan sama dengan tidak ada alamat', async () =>
   assert.equal(dibuat.length, 0);
 });
 
+test('argumen url yang tidak sah ditolak sebelum browser diluncurkan', async () => {
+  const { client, store, dibuat, opsiSesi } = await hubungkanDenganStore();
+  await store.save('checkout', yamlDenganLangkah(1));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'checkout', target: 'web', url: 'not-a-url' },
+  });
+  assert.equal(hasil.isError, true);
+  const teks = (hasil.content as any)[0].text;
+  assert.match(teks, /INVALID_URL/);
+  assert.match(teks, /not-a-url/, 'sebutkan nilai yang dikirim');
+  assert.match(teks, /https:\/\/example\.com/, 'sebutkan bentuk yang benar');
+  assert.match(teks, /You may retry/, 'salah ketik alamat itu bisa dikoreksi lalu diulang');
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser yang diluncurkan');
+  assert.deepEqual(opsiSesi, []);
+});
+
+test('url tidak sah di dalam blok target YAML ditolak dengan cara yang sama', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore();
+  await store.save('yaml-rusak', 'web:\n  url: contoh.test\ntasks: []\n');
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'yaml-rusak', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  const teks = (hasil.content as any)[0].text;
+  assert.match(teks, /INVALID_URL/);
+  assert.match(teks, /needs a scheme/);
+  assert.match(teks, /You may retry/);
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser yang diluncurkan');
+});
+
+test('url yang sah tetap lolos — penolakannya bukan sapu jagat', async () => {
+  const { client, store, dibuat, opsiSesi } = await hubungkanDenganStore();
+  await store.save('checkout', yamlDenganLangkah(1));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'checkout', target: 'web', url: 'http://localhost:3000/daftar' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.equal(dibuat.length, 1);
+  assert.deepEqual(opsiSesi, [{ url: 'http://localhost:3000/daftar' }]);
+});
+
 test('SCENARIO_NO_URL tidak ditandai retryable', () => {
   assert.equal(new ToolError('SCENARIO_NO_URL', 'apa saja').retryable, false);
 });

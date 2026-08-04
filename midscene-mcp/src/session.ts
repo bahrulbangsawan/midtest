@@ -1,5 +1,6 @@
 import type { Device, DeviceTarget } from './devices/types.ts';
 import { ToolError } from './errors.ts';
+import { pastikanUrlSesi } from './url.ts';
 
 /** Per-session options an MCP caller may supply to `start_session`. */
 export interface StartOpts {
@@ -52,8 +53,16 @@ export class SessionManager {
         'a session is already running; call end_session first',
       );
     }
+    // Validated *here*, before the factory runs, rather than in each tool handler:
+    // `start_session` and `run_scenario` both open sessions through this method, and
+    // `WebDeviceAdapter.open` launches Chrome before it ever calls `page.goto`. Checking
+    // at the chokepoint means an unopenable address costs no browser process, and no
+    // future caller can arrive here without the check. Nothing below this line runs when
+    // it throws — not even the budget reset.
+    const opsi: StartOpts =
+      opts.url === undefined ? opts : { ...opts, url: pastikanUrlSesi(opts.url) };
     this.#used = 0;
-    this.#device = await this.#buatDevice(target, opts);
+    this.#device = await this.#buatDevice(target, opsi);
   }
 
   current(): Device {

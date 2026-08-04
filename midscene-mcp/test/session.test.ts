@@ -40,6 +40,39 @@ test('start tanpa opsi tetap memanggil pabrik dengan objek opsi kosong', async (
   assert.deepEqual(optsDiterima, [{}]);
 });
 
+/**
+ * Cek alamat duduk di `start`, bukan di masing-masing handler tool, supaya
+ * `start_session` dan `run_scenario` tidak bisa saling melenceng. Tesnya juga di sini:
+ * pabrik device tidak boleh dipanggil sama sekali — di produksi, pabrik itulah yang
+ * meluncurkan Chrome sebelum `page.goto` sempat mengeluh.
+ */
+test('start menolak url yang tidak sah tanpa pernah memanggil pabrik device', async () => {
+  for (const rusak of ['contoh.test', 'not-a-url', 'mailto:a@b.test', '   ']) {
+    const { manager, dibuat } = buatManager();
+    await assert.rejects(
+      () => manager.start('web', { url: rusak }),
+      (err: ToolError) => err.code === 'INVALID_URL' && err.retryable === true,
+      `${JSON.stringify(rusak)} harus ditolak`,
+    );
+    assert.equal(dibuat.length, 0, 'tidak boleh ada device yang dibuat');
+  }
+});
+
+test('start yang ditolak karena url tidak meninggalkan sesi setengah jadi', async () => {
+  const { manager } = buatManager();
+  await assert.rejects(() => manager.start('web', { url: 'contoh.test' }));
+  assert.throws(() => manager.current(), (err: ToolError) => err.code === 'NO_SESSION');
+  // Dan sesi berikutnya yang benar tetap bisa dimulai.
+  await manager.start('web', { url: 'https://contoh.test' });
+  assert.equal(manager.current().target, 'web');
+});
+
+test('start meneruskan url yang sudah dipangkas ke pabrik device', async () => {
+  const { manager, optsDiterima } = buatManager();
+  await manager.start('web', { url: '  https://contoh.test  ' });
+  assert.deepEqual(optsDiterima, [{ url: 'https://contoh.test' }]);
+});
+
 test('start kedua tanpa end melempar SESSION_ACTIVE', async () => {
   const { manager } = buatManager();
   await manager.start('web');
