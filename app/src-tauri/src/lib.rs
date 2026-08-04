@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod agents;
 pub mod commands;
+pub mod settings;
 pub mod sidecar;
 
 use tauri::Manager;
