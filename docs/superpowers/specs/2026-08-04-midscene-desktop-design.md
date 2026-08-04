@@ -142,12 +142,48 @@ Tidak tahu apa pun soal Midscene; bagi modul ini sidecar adalah proses opaque.
 
 Tidak tahu apa pun soal ACP maupun MCP; modul ini hanya melihat pesan dan event langkah.
 
-Catatan transport: `createChat()` dari `@shadcn/helpers` adalah pemutar percakapan
-skrip untuk pengembangan UI, bukan transport produksi. Namun helper itu
-membuktikan `useChat({ connection })` dapat sepenuhnya berjalan client-side dengan
-mengemisi event AG-UI langsung ke stream processor. Jalur produksi memakai
-connection adapter sendiri yang mendengarkan event Tauri. Tidak diperlukan server
-HTTP lokal.
+### Transport — terverifikasi 2026-08-04
+
+Diperiksa langsung pada `@tanstack/ai` 0.42.0 dan `@tanstack/ai-react` 0.18.1.
+`useChat` menerima `connection?: ConnectionAdapter`, dan tipenya:
+
+```ts
+type ConnectionAdapter = ConnectConnectionAdapter | SubscribeConnectionAdapter;
+
+interface ConnectConnectionAdapter {
+  connect: (messages, data?, abortSignal?, runContext?) => AsyncIterable<StreamChunk>;
+}
+interface SubscribeConnectionAdapter {
+  subscribe: (abortSignal?) => AsyncIterable<StreamChunk>;
+  send: (messages, data?, abortSignal?, runContext?) => Promise<void>;
+}
+```
+
+**Tidak diperlukan server HTTP lokal.** Paket juga menyediakan helper non-HTTP siap
+pakai (`stream()`, `rpcStream()`), yang membuktikan jalur ini memang didukung, bukan
+akal-akalan.
+
+Bentuk yang dipilih: **`SubscribeConnectionAdapter`**. Ia cocok dengan arsitektur kita
+karena sisi Rust berumur panjang dan mendorong event secara mandiri:
+`send` → `invoke()` ke Rust; `subscribe` → listener event Tauri yang menghasilkan chunk.
+
+`StreamChunk = AGUIEvent` dari `@ag-ui/core`, sehingga pemetaannya langsung:
+
+| `session/update` ACP | Event AG-UI |
+|---|---|
+| `agent_message_chunk` | `TEXT_MESSAGE_CHUNK` |
+| `agent_thought_chunk` | `THINKING_TEXT_MESSAGE_START/CONTENT/END` |
+| `tool_call` | `TOOL_CALL_START` + `TOOL_CALL_ARGS` |
+| `tool_call_update` | `TOOL_CALL_END` / `TOOL_CALL_RESULT` |
+| awal/akhir prompt | `RUN_STARTED` / `RUN_FINISHED` / `RUN_ERROR` |
+
+**Konsekuensi yang menyederhanakan desain:** panel progres langkah cukup membaca event
+`TOOL_CALL_*` dari aliran yang sama. Kanal terpisah dari sidecar ke Tauri — yang
+diasumsikan perlu di bagian "Posisi Rust pada jalur data" — ternyata tidak dibutuhkan
+untuk v1.
+
+Catatan: `createChat()` dari `@shadcn/helpers` tetap berguna, tetapi hanya sebagai
+pemutar percakapan skrip untuk membangun dan menguji UI tanpa model.
 
 ### `build-demo.js` — sudah ada
 
@@ -308,8 +344,9 @@ Dibuktikan end-to-end: sesi `claude-agent-acp` dengan sidecar didaftarkan lewat
 `mcpServers`, dan agen melihat **10 dari 10 tool Midscene**. Diverifikasi memakai nama
 server unik agar tidak tertukar dengan konfigurasi Claude Code pengguna.
 
-**3. API connection kustom TanStack AI — BELUM DIJAWAB.** Satu-satunya yang tersisa.
-Tidak mengubah arsitektur; dituntaskan saat menyusun rencana antarmuka.
+**3. API connection kustom TanStack AI — TERJAWAB.** Lihat bagian Transport di atas.
+SubscribeConnectionAdapter dipakai; tidak butuh server HTTP. Justru menyederhanakan:
+panel progres cukup membaca event TOOL_CALL_* dari aliran yang sama.
 
 **4. `runYaml` publik — TERJAWAB, ya.** Sidecar sudah dibangun di atasnya dan terbukti
 menjalankan skenario nyata.
