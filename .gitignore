@@ -12,7 +12,11 @@ midscene_run/
 scenarios/
 
 # Build Tauri
-src-tauri/target/
 dist/
+
+# Build aplikasi Tauri
+app/node_modules/
+app/dist/
+app/src-tauri/target/
 
 .DS_Store
