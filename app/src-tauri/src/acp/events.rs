@@ -142,6 +142,26 @@ mod tests {
         assert_eq!(e["message"], "gagal konek");
     }
 
+    /// Jalur kode paling sering dipakai — pesan asisten biasa yang di-stream ke
+    /// pengguna — sengaja diuji lewat `to_agui` sendiri, bukan hanya lewat
+    /// pembangun `agui_text_chunk` mentah. Test ini yang membuat penukaran
+    /// lengan `AgentMessageChunk` <-> `AgentThoughtChunk` (atau salah cocok
+    /// varian `ContentBlock` di lengan ini) gagal dikompilasi lolos test,
+    /// bukan hanya lolos lalu diam-diam merender bubble "thinking" untuk
+    /// teks asisten biasa.
+    #[test]
+    fn potongan_pesan_agen_jadi_text_message_chunk_lewat_to_agui() {
+        use agent_client_protocol::schema::v1::ContentChunk;
+
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
+            "halo dari agen",
+        )));
+        let events = to_agui(&update, "r1", "t1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "TEXT_MESSAGE_CHUNK");
+        assert_eq!(events[0]["delta"], "halo dari agen");
+    }
+
     #[test]
     fn potongan_pemikiran_agen_jadi_thinking_content() {
         use agent_client_protocol::schema::v1::ContentChunk;
@@ -153,6 +173,19 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "THINKING_TEXT_MESSAGE_CONTENT");
         assert_eq!(events[0]["delta"], "menimbang opsi");
+    }
+
+    /// Konten non-teks (mis. gambar) pada potongan pesan/pemikiran tidak
+    /// punya delta string yang jujur untuk dikirim, jadi harus jatuh ke
+    /// `vec![]`, bukan mengarang teks.
+    #[test]
+    fn potongan_konten_non_teks_kembalikan_vec_kosong() {
+        use agent_client_protocol::schema::v1::{ContentChunk, ImageContent};
+
+        let gambar = ContentBlock::Image(ImageContent::new("base64data==", "image/png"));
+        let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(gambar));
+
+        assert_eq!(to_agui(&update, "r1", "t1"), Vec::<Value>::new());
     }
 
     #[test]
@@ -178,6 +211,24 @@ mod tests {
         let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             "call-1",
             ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+        ));
+
+        let events = to_agui(&update, "r1", "t1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "TOOL_CALL_END");
+        assert_eq!(events[0]["toolCallId"], "call-1");
+    }
+
+    /// "Selesai" mencakup gagal, bukan cuma sukses: klien butuh tahu tool call
+    /// itu berhenti dikirim update lagi supaya UI-nya berhenti berputar,
+    /// terlepas dari hasilnya.
+    #[test]
+    fn tool_call_gagal_juga_jadi_tool_call_end() {
+        use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
+
+        let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-1",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
         ));
 
         let events = to_agui(&update, "r1", "t1");
