@@ -62,6 +62,21 @@ printf '%s\n' \
 
 Catat balasan `initialize` secara utuh — khususnya `agentCapabilities` dan `promptCapabilities`.
 
+Sinyal awal (2026-08-04, dari README repo, **belum diverifikasi di tingkat protokol**):
+README `agentclientprotocol/claude-agent-acp` mencantumkan "Client MCP servers" sebagai
+fitur yang didukung. Menguatkan, tapi bukan bukti — daftar fitur bukan konfirmasi protokol.
+
+**Pertanyaan baru yang harus ikut dijawab di langkah ini.** Repo menyebut dirinya
+"ACP Adapter for Claude Agent SDK", bukan pembungkus Claude Code CLI, dan README-nya
+tidak menyebut apa pun soal autentikasi. Seluruh penalaran kepatuhan ToS di spec
+dibangun di atas pola Zed: aplikasi mengemudikan install Claude Code milik pengguna
+dengan login pengguna sendiri. Bila adapter ini justru berbasis Agent SDK yang menuntut
+API key, premis itu berubah untuk sisi Claude — dan bagian "Kepatuhan terhadap ketentuan
+langganan" di spec harus ditulis ulang untuk agen tersebut.
+
+Catat: apakah ia memakai kredensial Claude Code yang sudah ada, atau menuntut
+`ANTHROPIC_API_KEY` tersendiri.
+
 - [ ] **Step 3: Periksa API connection kustom TanStack AI**
 
 Buka dokumentasi `useChat` TanStack AI dan catat bentuk objek `connection` yang diterima: method apa yang wajib ada, dan event AG-UI apa yang harus diemisikan untuk teks streaming dan tool call.
