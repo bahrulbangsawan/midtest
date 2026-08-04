@@ -108,6 +108,7 @@ use agent_client_protocol::{
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
+use super::auto_permission::pick_allow;
 use super::events::to_agui;
 
 /// Nama klien yang dikirim ke agen pada `initialize`.
@@ -294,6 +295,7 @@ struct Inner {
     next_permission: AtomicU64,
     next_run: AtomicU64,
     notify_on_close: AtomicBool,
+    full_permissions: AtomicBool,
 }
 
 /// State yang dibagi antara perintah Tauri dan handler-handler peran klien.
@@ -341,6 +343,9 @@ impl ClientContext {
                 // Mulai dari "jangan beri tahu": sebelum satu sesi benar-benar
                 // berdiri, tidak ada koneksi yang layak dilaporkan putus.
                 notify_on_close: AtomicBool::new(false),
+                // Mati sampai pengaturan tersimpan dimuat saat start. Bawaan
+                // yang aman adalah bertanya.
+                full_permissions: AtomicBool::new(false),
             }),
         }
     }
@@ -363,6 +368,25 @@ impl ClientContext {
     #[must_use]
     pub fn permission_timeout(&self) -> Duration {
         self.inner.permission_timeout
+    }
+
+    /// Apakah mode izin penuh sedang menyala.
+    ///
+    /// Disimpan sebagai [`AtomicBool`], bukan di balik kunci sesi, karena
+    /// konteks ini dibaca dari dalam dispatch loop ACP sementara penulisnya
+    /// adalah perintah Tauri di thread lain — dan flag-nya boleh berubah di
+    /// tengah sesi yang sedang berjalan.
+    #[must_use]
+    pub fn full_permissions(&self) -> bool {
+        self.inner.full_permissions.load(Ordering::SeqCst)
+    }
+
+    /// Nyalakan atau matikan mode izin penuh.
+    ///
+    /// Hanya menyentuh flag di memori; ketahanannya lintas peluncuran adalah
+    /// urusan pemanggil (lihat `commands::set_full_permissions`).
+    pub fn set_full_permissions(&self, enabled: bool) {
+        self.inner.full_permissions.store(enabled, Ordering::SeqCst);
     }
 
     fn ids(&self) -> RunIds {
@@ -517,6 +541,11 @@ pub fn builder(
 
 /// Tangani satu `session/request_permission`.
 ///
+/// Bila mode izin penuh menyala **dan** agen menawarkan opsi yang jelas
+/// mengizinkan, permintaan dijawab di tempat tanpa membuka dialog. Selain itu —
+/// termasuk saat mode menyala tetapi tidak ada opsi izin yang jelas — jalur di
+/// bawah ini tidak berubah sama sekali.
+///
 /// Mengembalikan [`Handled::Yes`] segera: jawabannya dikirim belakangan dari
 /// task yang dijalankan [`ConnectionTo::spawn`], sehingga dispatch loop bebas
 /// menerima `$/cancel_request` untuk permintaan ini.
@@ -529,6 +558,23 @@ fn permission_gate(
     Handled<(RequestPermissionRequest, Responder<RequestPermissionResponse>)>,
     agent_client_protocol::Error,
 > {
+    // Mode izin penuh, sebelum apa pun yang lain: tidak ada entri peta yang
+    // didaftarkan dan tidak ada dialog yang dibuka bila kita menjawab sendiri.
+    //
+    // `pick_allow` mengembalikan `None` begitu agen tidak menawarkan satu pun
+    // opsi yang **jelas** mengizinkan — termasuk untuk varian `kind` yang belum
+    // dikenal, karena `PermissionOptionKind` `#[non_exhaustive]`. Dalam hal itu
+    // kita jatuh ke jalur bertanya yang sudah ada, bukan menolak dan apalagi
+    // bukan menyetujui. Jawabannya tetap lewat [`select_option`], jadi disiplin
+    // "hanya opsi yang benar-benar ditawarkan agen" berlaku sama di sini.
+    if ctx.full_permissions() {
+        if let Some(option_id) = pick_allow(&request.options) {
+            let response = select_option(&request, option_id.0.as_ref());
+            responder.respond(response)?;
+            return Ok(Handled::Yes);
+        }
+    }
+
     let request_id = ctx.new_permission_id();
     let rx = ctx.permissions().daftar(request_id.clone());
 
@@ -1057,6 +1103,121 @@ mod tests {
         ctx.permissions().jawab(&request_id, "tidak").unwrap();
         let balasan = agen.next_line().await;
         assert_eq!(balasan["result"]["outcome"]["optionId"], "tidak");
+
+        agen.shutdown().await;
+    }
+
+    // ------------------------------------------------------ mode izin penuh
+
+    fn opsi_hanya_penolakan() -> Vec<PermissionOption> {
+        vec![
+            PermissionOption::new("tidak", "Tolak", PermissionOptionKind::RejectOnce),
+            PermissionOption::new(
+                "tidak-selalu",
+                "Tolak selalu",
+                PermissionOptionKind::RejectAlways,
+            ),
+        ]
+    }
+
+    /// **Perilaku 1.** Dengan mode izin penuh menyala dan agen menawarkan
+    /// `AllowOnce`, permintaan dijawab langsung dengan `option_id` opsi itu dan
+    /// webview tidak pernah melihat satu pun `permission-request`.
+    #[tokio::test]
+    async fn mode_izin_penuh_menyetujui_tanpa_bertanya() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        ctx.set_full_permissions(true);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        agen.send_request(20, "session/request_permission", params_izin());
+
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 20);
+        assert_eq!(balasan["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(
+            balasan["result"]["outcome"]["optionId"], "ya",
+            "mode izin penuh harus memilih opsi AllowOnce: {balasan}"
+        );
+
+        // Emisi event mendahului balasan di jalur bertanya, jadi kalau dialog
+        // sempat dibuka, event-nya sudah ada di kanal saat balasan tiba.
+        assert!(
+            agen.try_next_event().is_none(),
+            "mode izin penuh tidak boleh membuka dialog"
+        );
+        assert_eq!(
+            ctx.permissions().pending_count(),
+            0,
+            "persetujuan otomatis tidak boleh meninggalkan entri di peta"
+        );
+
+        agen.shutdown().await;
+    }
+
+    /// **Perilaku 2.** Mode menyala tetapi agen tidak menawarkan satu pun opsi
+    /// yang jelas mengizinkan: gerbang **wajib** jatuh ke bertanya. Menolak
+    /// diam-diam salah, menyetujui diam-diam jauh lebih buruk.
+    #[tokio::test]
+    async fn mode_izin_penuh_tetap_bertanya_bila_tak_ada_opsi_izin() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        ctx.set_full_permissions(true);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        agen.send_request(
+            21,
+            "session/request_permission",
+            serde_json::to_value(permintaan(opsi_hanya_penolakan()))
+                .expect("harus terserialisasi"),
+        );
+
+        let (nama, payload) = agen.next_event().await;
+        assert_eq!(
+            nama, EVENT_PERMISSION_REQUEST,
+            "tanpa opsi izin, gerbang harus tetap bertanya"
+        );
+        let request_id = payload["requestId"]
+            .as_str()
+            .expect("requestId harus string")
+            .to_owned();
+
+        ctx.permissions()
+            .jawab(&request_id, "tidak")
+            .expect("penunggu harus ada");
+
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 21);
+        assert_eq!(balasan["result"]["outcome"]["optionId"], "tidak");
+
+        agen.shutdown().await;
+    }
+
+    /// **Perilaku 3.** Dengan mode mati — bawaannya — tidak ada yang berubah:
+    /// dialog tetap dibuka dan jawaban pengguna tetap yang menentukan.
+    #[tokio::test]
+    async fn mode_mati_tetap_membuka_dialog_seperti_sebelumnya() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        assert!(
+            !ctx.full_permissions(),
+            "mode izin penuh harus mati secara bawaan"
+        );
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        agen.send_request(22, "session/request_permission", params_izin());
+
+        let (nama, payload) = agen.next_event().await;
+        assert_eq!(nama, EVENT_PERMISSION_REQUEST);
+        let request_id = payload["requestId"]
+            .as_str()
+            .expect("requestId harus string")
+            .to_owned();
+
+        ctx.permissions()
+            .jawab(&request_id, "ya")
+            .expect("penunggu harus ada");
+
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 22);
+        assert_eq!(balasan["result"]["outcome"]["optionId"], "ya");
 
         agen.shutdown().await;
     }

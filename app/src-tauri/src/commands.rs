@@ -40,7 +40,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, SessionId};
 use agent_client_protocol::{Agent, ConnectionTo};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::acp::events::{agui_run_error, agui_run_finished, agui_run_started};
@@ -49,6 +49,7 @@ use crate::acp::{
     new_session,
 };
 use crate::agents::{AgentSpec, find_agent};
+use crate::settings;
 use crate::sidecar::midscene_server;
 
 /// Env var untuk menimpa akar repo yang dipakai sesi dan sidecar MCP.
@@ -337,6 +338,56 @@ pub fn answer_permission(
         .map_err(|error| error.to_string())
 }
 
+/// Apakah mode izin penuh sedang menyala.
+///
+/// Frontend memanggilnya saat start untuk menampilkan toggle pada posisi yang
+/// benar: mode ini bertahan lintas peluncuran, jadi UI yang selalu mulai dari
+/// "mati" akan berbohong tentang apa yang sedang berlaku.
+#[tauri::command]
+pub fn get_full_permissions(state: State<'_, AppState>) -> bool {
+    state.ctx.full_permissions()
+}
+
+/// Nyalakan atau matikan mode izin penuh, dan simpan pilihannya.
+///
+/// Urutannya sengaja: flag di memori dipasang **lebih dulu**, lalu disimpan.
+/// Itu penting untuk arah mematikan — arah yang menambah keamanan — yang harus
+/// berlaku seketika meskipun diska menolak ditulisi.
+///
+/// # Errors
+///
+/// Bila direktori config tidak bisa ditentukan atau berkas gagal ditulis.
+/// Kegagalan menyimpan **tidak boleh** ditelan: pengguna memilih mode ini untuk
+/// bertahan, jadi diam-diam melupakannya berarti berbohong pada peluncuran
+/// berikutnya. UI-lah yang menampilkan kalimat ini.
+#[tauri::command]
+pub fn set_full_permissions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state.ctx.set_full_permissions(enabled);
+
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Direktori pengaturan tidak bisa ditentukan: {error}"))?;
+
+    settings::save(
+        &dir,
+        &settings::Settings {
+            full_permissions: enabled,
+        },
+    )
+    .map_err(|error| {
+        format!(
+            "Mode izin penuh berlaku sekarang, tetapi gagal disimpan ke {}: {error}. \
+             Pilihan ini tidak akan bertahan setelah aplikasi ditutup.",
+            dir.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +638,26 @@ mod tests {
         giliran.abort();
         drop(giliran.await);
         agen.shutdown().await;
+    }
+
+    /// Jalur yang dipakai `get_full_permissions` / `set_full_permissions`:
+    /// keduanya lewat `state.ctx`, yaitu konteks yang sama yang dibawa gerbang
+    /// izin. Bila `AppState` suatu saat menyimpan konteks kedua, perintahnya
+    /// akan menyetel flag yang tidak dibaca siapa pun — dan itu tidak terlihat
+    /// dari test gerbang mana pun.
+    #[tokio::test]
+    async fn state_meneruskan_flag_izin_penuh_ke_konteks_gerbang() {
+        let (state, _events) = state_uji();
+        assert!(
+            !state.ctx().full_permissions(),
+            "bawaan wajib mati: bertanya adalah sisi yang aman"
+        );
+
+        state.ctx.set_full_permissions(true);
+        assert!(state.ctx().full_permissions());
+
+        state.ctx.set_full_permissions(false);
+        assert!(!state.ctx().full_permissions());
     }
 
     /// Tanpa sesi, `turn_target` menolak dengan kalimat yang bisa dibaca
