@@ -83,7 +83,7 @@ Pembagian permukaan tool MCP di bawah mengikuti struktur ini secara langsung.
 │        ▲ event AG-UI          │
 │  ──────┼──────────────────    │
 │  Rust core                    │
-│   • ACP client (stdio)  ──────┼──▶ codex acp │ claude-agent-acp
+│   • ACP client (stdio)  ──────┼──▶ codex-acp │ claude-agent-acp
 │   • lifecycle sidecar   ──────┼──▶ Midscene MCP server (Node)
 │   • gerbang izin              │         │
 └───────────────────────────────┘         ▼
@@ -209,9 +209,14 @@ draf; pengguna memegang kata akhir.
 
 ## Penanganan galat
 
-**Prasyarat hilang** (`codex`, `claude-agent-acp`, Node, Chrome). Diperiksa saat
-aplikasi start, ditampilkan sebagai panel prasyarat dengan instruksi install,
-bukan crash.
+**Prasyarat hilang.** Tidak ada agen yang punya mode ACP native — keduanya butuh
+adapter terpisah yang mengemudikan CLI lokal. Jadi yang diperiksa ada **enam**:
+`codex` CLI dan `codex-acp` untuk sisi Codex; Claude Code dan `claude-agent-acp`
+untuk sisi Claude; ditambah Node dan Chrome. Diperiksa saat aplikasi start,
+ditampilkan sebagai panel prasyarat dengan instruksi install, bukan crash.
+
+Konsekuensi yang menguntungkan: karena keduanya adapter atas CLI milik pengguna,
+argumen kepatuhan ToS di atas berlaku seragam untuk kedua agen.
 
 **Agen belum login.** Method `authenticate` pada ACP di-surface sebagai prompt,
 bukan error mentah. Aplikasi tidak pernah menyimpan kredensial; login terjadi di

@@ -37,7 +37,33 @@ Login bersifat interaktif, jadi jalankan sendiri di sesi ini dengan awalan `!`:
 ! npm install -g @openai/codex && codex --version && codex --help
 ```
 
-Catat: versi yang terpasang, apakah ada subcommand `acp`, dan persis bagaimana memanggilnya.
+### TERJAWAB — dijalankan 2026-08-04 pada `codex-cli` 0.146.0
+
+**Codex TIDAK punya mode ACP native.** Tidak ada subcommand `acp`. Yang tersedia:
+`mcp` (mengelola server MCP eksternal lewat config), `mcp-server` (Codex *sebagai*
+server MCP), dan `app-server` (eksperimental, **protokol milik Codex sendiri**, bukan ACP —
+punya `generate-json-schema` dan `generate-ts` tersendiri).
+
+ACP datang dari **adapter terpisah**, persis seperti sisi Claude:
+`@agentclientprotocol/codex-acp` 1.1.9, binary `codex-acp`.
+Paket lama `@zed-industries/codex-acp` 0.16.0 sudah deprecated dengan pesan yang sepola:
+*"This package has been replaced by @agentclientprotocol/codex-acp."*
+
+Konsekuensi untuk desain: **dua-duanya adapter yang mengemudikan CLI lokal milik pengguna.**
+Ini justru memperkuat argumen kepatuhan ToS di spec, bukan melemahkannya — aplikasi tetap
+sekadar ACP client, dan login tetap terjadi di `codex login` milik pengguna.
+
+Prasyarat yang harus dideteksi aplikasi jadi **empat**, bukan dua: `codex` CLI **dan**
+`codex-acp` untuk sisi Codex; Claude Code **dan** `claude-agent-acp` untuk sisi Claude.
+
+Belum dijalankan: handshake `initialize` terhadap `codex-acp` untuk memastikan dukungan
+`mcpServers` dan `promptCapabilities.image`. Perintahnya:
+
+```
+! npm install -g @agentclientprotocol/codex-acp && codex-acp --version
+```
+
+lalu handshake yang sama seperti Step 2.
 
 - [ ] **Step 2: Install Claude Code ACP adapter dan periksa dukungan `mcpServers`**
 
