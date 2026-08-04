@@ -13,6 +13,9 @@
 //!   group* anak saat future koneksi di-drop, sehingga proses anak tidak bocor.
 
 pub mod client;
+pub mod session;
+
+pub use session::new_session;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
