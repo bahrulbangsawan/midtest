@@ -290,25 +290,62 @@ event langkah, screenshot live, budget guard, dan deteksi prasyarat.
 Jika ruang lingkupnya terasa terlalu besar untuk satu rencana implementasi, Tahap 1
 dapat dipisahkan menjadi proyek tersendiri dengan spec dan rencananya sendiri.
 
-## Verifikasi yang wajib dilakukan sebelum menulis kode
+## Verifikasi — status per 2026-08-04
 
-Empat asumsi yang belum terbukti pada mesin pengembangan saat ini. Keempatnya
-menjadi langkah pertama rencana implementasi.
+Empat asumsi awal. Tiga sudah dijawab dengan menjalankan, bukan membaca.
 
-1. Versi Codex mana yang memiliki mode ACP native, dan bagaimana cara memanggilnya
-2. Apakah `claude-agent-acp` mendukung parameter `mcpServers` pada `session/new`
-3. Bentuk API connection kustom TanStack AI di luar helper mock-nya
-4. Apakah `@midscene/computer` v1.10.8 mengekspos `ScriptPlayer`/`runYaml` sebagai
-   API publik atau hanya internal
+**1. Mode ACP Codex — TERJAWAB, dan asumsinya salah.**
+`codex-cli` 0.146.0 **tidak punya** subcommand `acp`. Yang ada: `mcp`, `mcp-server`,
+dan `app-server` (protokol milik Codex sendiri). ACP datang dari adapter terpisah
+`@agentclientprotocol/codex-acp` 1.1.9, yang men-spawn
+`${CODEX_PATH ?? "codex"} app-server` — jadi ia penerjemah ACP ⟷ app-server.
+Sisi Claude sepola: `@agentclientprotocol/claude-agent-acp` 0.64.2.
+Keduanya adapter atas CLI lokal milik pengguna, sehingga argumen kepatuhan ToS di atas
+berlaku seragam.
 
-Jika nomor 2 gagal, sidecar harus dipanggil melalui jalur lain untuk agen tersebut.
-Jika nomor 4 gagal, mode replay harus dibangun di atas API agent biasa dengan
-`cacheId` alih-alih YAML.
+**2. `mcpServers` pada `session/new` — TERJAWAB, didukung.**
+Dibuktikan end-to-end: sesi `claude-agent-acp` dengan sidecar didaftarkan lewat
+`mcpServers`, dan agen melihat **10 dari 10 tool Midscene**. Diverifikasi memakai nama
+server unik agar tidak tertukar dengan konfigurasi Claude Code pengguna.
+
+**3. API connection kustom TanStack AI — BELUM DIJAWAB.** Satu-satunya yang tersisa.
+Tidak mengubah arsitektur; dituntaskan saat menyusun rencana antarmuka.
+
+**4. `runYaml` publik — TERJAWAB, ya.** Sidecar sudah dibangun di atasnya dan terbukti
+menjalankan skenario nyata.
+
+### Kemampuan agen yang terverifikasi, dan konsekuensinya
+
+| | `codex-acp` 1.1.9 | `claude-agent-acp` 0.64.2 |
+|---|---|---|
+| `authMethods` | `api-key`, **`chat-gpt`** | `[]` (sudah terautentikasi) |
+| MCP stdio / http / sse | ya / ya / **tidak** | ya / ya / ya |
+| `promptCapabilities.image` | ya | ya |
+| `sessionCapabilities.fork` | tidak | ya |
+| `resume` / `list` / `close` / `delete` | ya | ya |
+
+Tiga konsekuensi untuk desain antarmuka:
+
+- **Dua alur auth yang berbeda.** Codex mengembalikan dua metode dan menuntut pilihan
+  eksplisit lewat `authenticate`; jalur `chat-gpt` adalah jalur langganan. Claude
+  mengembalikan array kosong karena sudah terautentikasi. Panel auth tidak bisa satu
+  bentuk untuk keduanya.
+- **Riwayat percakapan persisten sudah native.** `loadSession`, `resume`, `list`, dan
+  `delete` tersedia di kedua agen. Fitur yang semula ditunda dari v1 ternyata tidak
+  perlu dibangun sendiri.
+- **Sesi mewarisi server MCP milik pengguna** dari konfigurasi CLI-nya, digabung dengan
+  yang dikirim klien. Pada mesin uji, agen melihat `pencil` dan `mobbin` di samping
+  sidecar kita. Aplikasi tidak boleh berasumsi hanya tool-nya sendiri yang ada di sesi.
+
+Bukti lengkap: `docs/superpowers/notes/2026-08-04-hasil-e2e.md`.
 
 ## Status perkakas mesin pengembangan
 
-Terpasang: Node v26.5.1, Chrome (lewat `PUPPETEER_EXECUTABLE_PATH`).
+Terpasang: Node v26.5.1, Chrome, Xcode Command Line Tools, Bun,
+Rust 1.97.1 / cargo 1.97.1 (`aarch64-apple-darwin`),
+`codex` 0.146.0, `codex-acp` 1.1.9, `claude-agent-acp` 0.64.2.
 
-Belum terpasang: `cargo`, `tauri`, `codex`, `claude-agent-acp`, `pnpm`.
+Belum terpasang: Tauri CLI.
 
-Direktori proyek belum berupa repositori git.
+Catatan: `~/.cargo/bin` belum ada di PATH shell non-interaktif — perlu
+`source "$HOME/.cargo/env"` atau ekspor PATH eksplisit.
