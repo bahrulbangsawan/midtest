@@ -1834,7 +1834,13 @@ Deliverable terakhir yang membuat sidecar berguna bagi orang lain — dan yang m
 ```bash
 # Konfigurasi model VLM untuk grounding Midscene.
 # Ini API key berbayar milikmu sendiri — terpisah dari langganan Codex/Claude.
-# Family yang didukung: gpt-4o, qwen2.5-vl, qwen3-vl, doubao-vision, doubao-seed, gemini
+# Family yang didukung — MODEL_FAMILY_VALUES di @midscene/shared@1.10.8:
+#   doubao-vision, doubao-seed, gemini, qwen2.5-vl, qwen3-vl, qwen3, qwen3.5,
+#   qwen3.6, vlm-ui-tars, vlm-ui-tars-doubao, vlm-ui-tars-doubao-1.5, glm-v,
+#   auto-glm, auto-glm-multilingual, gpt-5, kimi, kimi3, xiaomi-mimo
+# CATATAN: versi awal rencana ini menyebut "gpt-4o" — itu SALAH. Nilai tersebut
+# tidak ada di MODEL_FAMILY_VALUES; ia hanya muncul sebagai contoh nama model di
+# komentar JSDoc. getModelAdapter melempar untuk family tak dikenal.
 MIDSCENE_MODEL_BASE_URL=
 MIDSCENE_MODEL_API_KEY=
 MIDSCENE_MODEL_NAME=
