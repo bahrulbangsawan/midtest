@@ -9,12 +9,14 @@ import { createDevice } from './devices/factory.ts';
 const root = process.env.MIDSCENE_MCP_ROOT ?? process.cwd();
 const budgetMentah = process.env.MIDSCENE_MCP_BUDGET;
 const budgetDiminta = Number(budgetMentah);
-const budgetSah = Number.isFinite(budgetDiminta) && budgetDiminta > 0;
+// `SessionManager` re-checks this itself; the check is repeated here only so an
+// invalid env var produces a readable warning instead of a silent fallback.
+const budgetSah = SessionManager.batasSah(budgetDiminta);
 const budget = budgetSah ? budgetDiminta : DEFAULT_BUDGET;
 if (budgetMentah !== undefined && !budgetSah) {
   // stderr only — stdout carries the JSON-RPC channel and must stay clean.
   console.error(
-    `[midscene-mcp] ignoring invalid MIDSCENE_MCP_BUDGET=${JSON.stringify(budgetMentah)}; using the default of ${DEFAULT_BUDGET}. Expected a positive number.`,
+    `[midscene-mcp] ignoring invalid MIDSCENE_MCP_BUDGET=${JSON.stringify(budgetMentah)}; using the default of ${DEFAULT_BUDGET}. Expected a positive whole number.`,
   );
 }
 

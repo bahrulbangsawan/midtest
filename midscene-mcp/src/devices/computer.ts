@@ -1,5 +1,6 @@
 import { agentForComputer } from '@midscene/computer';
 import type { Device, DeviceOpts, KelasAdapter, Screenshot } from './types.ts';
+import { opsiCache } from './cache.ts';
 import { uraikanDataUriGambar } from './screenshot.ts';
 
 type ComputerAgent = Awaited<ReturnType<typeof agentForComputer>>;
@@ -23,7 +24,7 @@ export class ComputerDeviceAdapter implements Device {
     // The start_session handler already tells the caller the url was ignored.
     const agent = await agentForComputer({
       aiActionContext: 'You are controlling a macOS desktop computer.',
-      ...(opts.cacheId ? { cacheId: opts.cacheId } : {}),
+      ...opsiCache(opts),
     });
     return new ComputerDeviceAdapter(agent);
   }

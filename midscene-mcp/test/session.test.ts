@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SessionManager } from '../src/session.ts';
+import { SessionManager, DEFAULT_BUDGET } from '../src/session.ts';
 import { FakeDevice } from '../src/devices/fake.ts';
 import { ToolError } from '../src/errors.ts';
 
@@ -67,6 +67,61 @@ test('spend melampaui batas melempar BUDGET_EXCEEDED', async () => {
   manager.spend();
   manager.spend();
   assert.throws(() => manager.spend(), (err: ToolError) => err.code === 'BUDGET_EXCEEDED');
+});
+
+test('spend bisa memesan beberapa operasi sekaligus', async () => {
+  const { manager } = buatManager(10);
+  await manager.start('web');
+  manager.spend(4);
+  assert.equal(manager.budgetStatus().used, 4);
+  assert.equal(manager.budgetStatus().remaining, 6);
+});
+
+test('spend banyak yang tidak muat ditolak tanpa memotong budget sebagian', async () => {
+  const { manager } = buatManager(3);
+  await manager.start('web');
+  assert.throws(() => manager.spend(4), (err: ToolError) => err.code === 'BUDGET_EXCEEDED');
+  assert.equal(manager.budgetStatus().used, 0, 'penolakan tidak boleh memotong sebagian');
+});
+
+test('spend menolak jumlah yang bukan bilangan bulat non-negatif', async () => {
+  const { manager } = buatManager(10);
+  await manager.start('web');
+  assert.throws(() => manager.spend(1.5), (err: ToolError) => err.code === 'INTERNAL');
+  assert.throws(() => manager.spend(-1), (err: ToolError) => err.code === 'INTERNAL');
+  assert.throws(() => manager.spend(Number.NaN), (err: ToolError) => err.code === 'INTERNAL');
+});
+
+// --- Batas budget divalidasi di dalam SessionManager, bukan hanya di src/index.ts ---
+
+test('limit NaN jatuh ke DEFAULT_BUDGET, bukan berjalan tanpa batas', async () => {
+  const { manager } = buatManager(Number('bogus'));
+  await manager.start('web');
+  assert.equal(manager.limit, DEFAULT_BUDGET);
+  manager.spend(DEFAULT_BUDGET);
+  assert.equal(manager.budgetStatus().limit, DEFAULT_BUDGET);
+  assert.throws(() => manager.spend(), (err: ToolError) => err.code === 'BUDGET_EXCEEDED');
+});
+
+test('limit pecahan, nol, negatif dan tak hingga jatuh ke DEFAULT_BUDGET', async () => {
+  for (const buruk of [2.5, 0, -3, Number.POSITIVE_INFINITY]) {
+    const { manager } = buatManager(buruk);
+    assert.equal(manager.limit, DEFAULT_BUDGET, `limit ${buruk} harus ditolak`);
+  }
+});
+
+test('limit bilangan bulat positif dipakai apa adanya', () => {
+  const { manager } = buatManager(7);
+  assert.equal(manager.limit, 7);
+});
+
+test('batasSah menerima hanya bilangan bulat positif', () => {
+  assert.equal(SessionManager.batasSah(1), true);
+  assert.equal(SessionManager.batasSah(40), true);
+  assert.equal(SessionManager.batasSah(0), false);
+  assert.equal(SessionManager.batasSah(2.5), false);
+  assert.equal(SessionManager.batasSah(Number.NaN), false);
+  assert.equal(SessionManager.batasSah(Number.POSITIVE_INFINITY), false);
 });
 
 test('end menutup device dan mereset budget', async () => {

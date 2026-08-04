@@ -1,6 +1,7 @@
 import puppeteer, { type Browser, type Page } from 'puppeteer';
 import { PuppeteerAgent } from '@midscene/web/puppeteer';
 import type { Device, DeviceOpts, KelasAdapter, Screenshot } from './types.ts';
+import { opsiCache } from './cache.ts';
 
 /**
  * Matches the human partner's proven script (`demo-registrasi.mjs`).
@@ -47,7 +48,7 @@ export class WebDeviceAdapter implements Device {
     try {
       const page = await browser.newPage();
       if (opts.url) await page.goto(opts.url, { waitUntil: 'domcontentloaded' });
-      const agent = new PuppeteerAgent(page, opts.cacheId ? { cacheId: opts.cacheId } : {});
+      const agent = new PuppeteerAgent(page, opsiCache(opts));
       return new WebDeviceAdapter(browser, page, agent);
     } catch (err) {
       await browser.close().catch(() => {});

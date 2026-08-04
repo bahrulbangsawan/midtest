@@ -79,8 +79,12 @@ export function registerExplorationTools(server: McpServer, sessions: SessionMan
         const device = sessions.current();
         sessions.spend();
         const hasil = await device.query(schema).catch(bungkusGalatDevice);
+        // `JSON.stringify(undefined)` is the JS value `undefined`, not a string — the
+        // MCP SDK then rejects the whole call with a protocol error (-32602) and the
+        // agent gets no `[CODE]` and no guidance, having already paid for the query.
+        // Coercing to `null` keeps the answer inside the tool result.
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(hasil, null, 2) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(hasil ?? null, null, 2) }],
         };
       } catch (err) {
         return toToolResult(err);

@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   ambilKelasAdapter,
   pilihKelasDevice,
@@ -50,4 +52,58 @@ test('ambilKelasAdapter menolak kelas dengan target yang tidak cocok', () => {
     () => ambilKelasAdapter({ WebDeviceAdapter: Palsu }, 'WebDeviceAdapter', 'web'),
     /declares target "computer" but was loaded for target "web"/,
   );
+});
+
+// --- Cache benar-benar aktif, bukan sekadar cacheId ---
+
+// Tes ini memanggil fungsi Midscene yang sama persis dengan yang dipanggil Agent
+// (`Agent#processCacheConfig` -> `processCacheConfig(opts.cache, opts.cacheId)`),
+// dengan MIDSCENE_CACHE sengaja dihapus. Kalau opsiCache berhenti mengirim
+// `cache: true`, hasilnya undefined, Agent melewati `new TaskCache(...)`, dan setiap
+// replay membayar VLM penuh — persis bug yang ditemukan reviewer.
+test('opsiCache menghasilkan konfigurasi yang benar-benar membangun TaskCache', async () => {
+  const { processCacheConfig } = await import('@midscene/core/utils');
+  // Sengaja dari modul internal (lewat file URL — subpath ini tidak ada di peta
+  // `exports`): `Agent#processCacheConfig` memanggil ini LEBIH DULU, dan ia melempar
+  // untuk `cache: true`. Tanpa memakukan itu di sini, bentuk opsi yang salah baru
+  // ketahuan saat konstruktor Agent sungguhan meledak — yaitu saat browser sudah
+  // diluncurkan dan pengguna sudah menunggu.
+  const jalurCacheConfig = pathToFileURL(
+    join(import.meta.dirname, '..', 'node_modules', '@midscene', 'core', 'dist', 'es', 'agent', 'cache-config.mjs'),
+  ).href;
+  const { validateAgentCacheInput } = (await import(jalurCacheConfig)) as {
+    validateAgentCacheInput: (cache: unknown) => void;
+  };
+  const { opsiCache } = await import('../src/devices/cache.ts');
+
+  const sebelumnya = process.env.MIDSCENE_CACHE;
+  delete process.env.MIDSCENE_CACHE;
+  try {
+    const opts = opsiCache({ cacheId: 'midscene-mcp-web' });
+    assert.deepEqual(opts, {
+      cacheId: 'midscene-mcp-web',
+      cache: { id: 'midscene-mcp-web' },
+    });
+
+    validateAgentCacheInput(opts.cache);
+    assert.throws(
+      () => validateAgentCacheInput(true as never),
+      /cache: true requires an explicit cache ID/,
+      'bentuk `cache: true` ditolak Midscene — opsiCache harus mengirim bentuk objek',
+    );
+    const cfg = processCacheConfig(opts.cache, opts.cacheId ?? 'default');
+    assert.deepEqual(cfg, { id: 'midscene-mcp-web' });
+    assert.ok(cfg, 'cfg truthy adalah syarat Agent memanggil new TaskCache(...)');
+
+    // Kontrol: jalur lama (hanya cacheId, tanpa env var) menghasilkan undefined.
+    assert.equal(processCacheConfig(undefined, 'midscene-mcp-web'), undefined);
+  } finally {
+    if (sebelumnya === undefined) delete process.env.MIDSCENE_CACHE;
+    else process.env.MIDSCENE_CACHE = sebelumnya;
+  }
+});
+
+test('opsiCache tanpa cacheId tidak memaksa cache', async () => {
+  const { opsiCache } = await import('../src/devices/cache.ts');
+  assert.deepEqual(opsiCache({}), {});
 });

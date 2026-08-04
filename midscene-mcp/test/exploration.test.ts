@@ -119,6 +119,19 @@ test('query mengembalikan hasil sebagai JSON', async () => {
   assert.match((hasil.content as any)[0].text, /"judul": ?"Beranda"/);
 });
 
+test('query yang menghasilkan undefined mengembalikan null, bukan galat protokol', async () => {
+  // FakeDevice.queryResult sengaja dibiarkan undefined. Tanpa `?? null`,
+  // JSON.stringify(undefined) bernilai undefined dan SDK menolak seluruh tool call
+  // dengan MCP error -32602 — agen tidak dapat [CODE] apa pun padahal budget sudah
+  // terpotong.
+  const { client, dibuat } = await hubungkan();
+  await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
+  dibuat[0].queryResult = undefined;
+  const hasil = await client.callTool({ name: 'query', arguments: { schema: '{judul: string}' } });
+  assert.notEqual(hasil.isError, true);
+  assert.equal((hasil.content as any)[0].text, 'null');
+});
+
 test('screenshot mengembalikan content block gambar dan tidak memotong budget', async () => {
   const { client } = await hubungkan(2);
   await client.callTool({ name: 'start_session', arguments: { target: 'computer' } });

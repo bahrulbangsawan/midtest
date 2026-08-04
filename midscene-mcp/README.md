@@ -42,7 +42,7 @@ Variabel yang tersedia:
 | `MIDSCENE_MODEL_API_KEY` | API key model VLM |
 | `MIDSCENE_MODEL_NAME` | Nama model spesifik dari provider |
 | `MIDSCENE_MODEL_FAMILY` | Salah satu family yang didukung — lihat daftar di [Prasyarat](#prasyarat) |
-| `MIDSCENE_CACHE` | Set ke `1` untuk mengaktifkan cache Midscene |
+| `MIDSCENE_CACHE` | Jalur lama untuk mengaktifkan cache Midscene. **Tidak lagi diperlukan** — adapter `midscene-mcp` selalu mengirim opsi `cache` modern ke Agent, jadi cache aktif tanpa variabel ini |
 | `PUPPETEER_EXECUTABLE_PATH` | Path ke binary Chrome (perlu di Apple Silicon karena Chrome bawaan Puppeteer tidak ter-sign dengan benar) |
 | `MIDSCENE_MCP_BUDGET` | Batas operasi AI per sesi eksplorasi (default 40) |
 | `MIDSCENE_MCP_ROOT` | Root repo — dipakai server untuk menentukan lokasi `scenarios/` dan `build-demo.js`, lihat catatan di bawah |
@@ -55,12 +55,22 @@ sendiri. `ScenarioStore` menyimpan skenario di `<root>/scenarios/`, dan tool
 `build_walkthrough` memanggil `<root>/build-demo.js`; keduanya diturunkan
 dari `MIDSCENE_MCP_ROOT`.
 
+**`--env-file` wajib ada.** Server ini tidak memakai `dotenv` dan tidak
+membaca `.env` sendiri; klien MCP juga menjalankannya sebagai proses anak
+yang tidak mewarisi environment shell-mu. Tanpa flag ini, server tetap
+start dan `tools/list` tetap jalan, tapi `act` pertama langsung gagal
+karena tidak ada kunci model. Arahkan flag ke `.env` di **root repo** —
+berkas yang sama yang kamu buat dengan `cp .env.example .env` di atas.
+
 ```json
 {
   "mcpServers": {
     "midscene": {
       "command": "node",
-      "args": ["/absolute/path/to/midscene-desktop/midscene-mcp/src/index.ts"],
+      "args": [
+        "--env-file=/absolute/path/to/midscene-desktop/.env",
+        "/absolute/path/to/midscene-desktop/midscene-mcp/src/index.ts"
+      ],
       "env": {
         "MIDSCENE_MCP_ROOT": "/absolute/path/to/midscene-desktop"
       }
@@ -69,9 +79,14 @@ dari `MIDSCENE_MCP_ROOT`.
 }
 ```
 
-Variabel model (`MIDSCENE_MODEL_*`) dan `MIDSCENE_CACHE` juga perlu
-tersedia di environment tempat proses `node` ini berjalan — isi lewat blok
-`env` yang sama atau lewat `.env` yang sudah di-load shell induknya.
+Semua variabel di tabel di atas — `MIDSCENE_MODEL_*`, `MIDSCENE_CACHE`,
+`PUPPETEER_EXECUTABLE_PATH`, `MIDSCENE_MCP_BUDGET` — dibaca dari berkas itu.
+`MIDSCENE_MCP_ROOT` sengaja tetap di blok `env` karena ia menunjuk ke lokasi
+repo, bukan konfigurasi model; menaruhnya di `.env` juga boleh.
+
+Kalau `.env` belum tentu ada (misalnya konfigurasi yang dibagikan ke mesin
+lain), pakai `--env-file-if-exists=` dengan path yang sama: `--env-file`
+membuat `node` gagal start bila berkasnya tidak ditemukan.
 
 ## Sepuluh tool
 
@@ -85,7 +100,7 @@ tersedia di environment tempat proses `node` ini berjalan — isi lewat blok
 | `end_session` | Menutup sesi yang berjalan dan melepas koneksi browser/desktop. |
 | `save_scenario` | Membekukan urutan langkah yang terbukti berhasil saat eksplorasi menjadi berkas YAML Midscene yang bisa dipakai ulang. |
 | `list_scenarios` | Menampilkan daftar nama skenario yang sudah tersimpan. |
-| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — murah karena langkah yang sudah di-cache melewati model vision sepenuhnya. |
+| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — langkah yang sudah di-cache melewati model vision sepenuhnya. Tetap dipotong dari budget di muka: satu operasi AI per langkah `flow` di YAML-nya. Skenario yang lebih panjang dari budget ditolak `BUDGET_EXCEEDED` dan tidak dijalankan sama sekali. |
 | `build_walkthrough` | Mengubah report Midscene menjadi halaman walkthrough berbahasa Indonesia yang berdiri sendiri. |
 
 ## Alur kerja
@@ -95,8 +110,10 @@ tersedia di environment tempat proses `node` ini berjalan — isi lewat blok
    membayar VLM secara penuh.
 2. **`save_scenario`** — bekukan langkah yang berhasil jadi YAML.
 3. **`run_scenario` berulang** — jalankan skenario tersimpan sesering
-   dibutuhkan untuk regresi. Dengan `MIDSCENE_CACHE=1`, replay ini nyaris
-   gratis karena cache Midscene melewati panggilan VLM.
+   dibutuhkan untuk regresi. Replay ini nyaris gratis karena cache Midscene
+   melewati panggilan VLM; cache-nya aktif otomatis, tidak perlu
+   `MIDSCENE_CACHE=1`. Tapi replay tetap dibatasi budget — lihat
+   [Batas budget](#batas-budget).
 4. **`build_walkthrough`** — ambil report dari salah satu run dan susun jadi
    dokumentasi walkthrough Indonesia yang bisa dibagikan.
 
@@ -110,7 +127,10 @@ ditagih terpisah lewat API key sendiri.
 
 Yang benar-benar menghemat biaya adalah **cache Midscene**: run eksplorasi
 pertama membayar penuh, tapi run replay berikutnya lewat cache nyaris
-gratis.
+gratis. Adapter di sini mengirim opsi `cache` modern ke Agent Midscene
+(bukan cuma `cacheId`, yang hanya berlaku kalau `MIDSCENE_CACHE` di-set),
+jadi `TaskCache` benar-benar terbentuk tanpa bergantung pada variabel
+environment.
 
 | Lapisan | Pelaksana | Biaya |
 |---|---|---|
@@ -128,9 +148,38 @@ mentah**: satu `act` bisa memicu lebih dari satu panggilan model di
 internal Midscene, jadi angka budget adalah batas bawah yang bisa
 diprediksi, bukan angka tagihan.
 
+Budget dipesan **sebelum** operasinya dijalankan, bukan setelah berhasil.
+Operasi yang gagal tetap memotong budget: kegagalan tetap membayar model.
+
+`run_scenario` juga ikut dibatasi, bukan pengecualian. Saat replay
+dijalankan, server mengurai YAML skenario dengan parser Midscene sendiri
+(`parseYamlScript` — parser yang sama yang dipakai `runYaml`), menghitung
+seluruh langkah `flow` di semua task, lalu memotong sebanyak itu di muka:
+
+- Skenario dengan langkah lebih banyak daripada budget ditolak
+  `BUDGET_EXCEEDED` **sebelum** sesi dibuka — tidak ada browser yang
+  diluncurkan dan tidak ada satu pun langkah yang dijalankan.
+- Semua langkah dihitung, termasuk yang sebenarnya gratis (`sleep`,
+  `javascript`, `logScreenshot`). Ini penjaga biaya, jadi ia sengaja
+  membulatkan ke arah menagih lebih — kosakata `flow` Midscene bertambah
+  antar-rilis, dan kunci yang belum dikenal berkas ini tidak boleh otomatis
+  gratis.
+- Skenario yang YAML-nya tidak bisa diurai ditolak (`INTERNAL`), bukan
+  diloloskan tanpa batas. Kalau biayanya tidak bisa dihitung, ia tidak
+  dijalankan.
+- Hasil yang sukses melaporkan potongannya: `Charged N of LIMIT AI
+  operations.`
+
+Cache tidak mengurangi potongan ini. Cache memangkas **tagihan sungguhan**
+(langkah yang kena cache tidak memanggil VLM), sementara budget adalah
+plafon atas yang dihitung tanpa menebak-nebak isi cache.
+
 Default-nya 40 operasi per sesi. Ubah lewat `MIDSCENE_MCP_BUDGET` di
-environment. Nilai yang tidak valid (bukan angka positif) diabaikan — server
-kembali ke default 40 dan mencetak peringatan ke stderr, bukan gagal diam-diam.
+environment. Nilai yang tidak valid (bukan bilangan bulat positif —
+termasuk `2.5`, `0`, `-1`, dan `bogus`) diabaikan: server kembali ke default
+40 dan mencetak peringatan ke stderr, bukan gagal diam-diam. Validasi ini
+ada di dalam `SessionManager` sendiri, bukan cuma di `src/index.ts`, jadi
+tidak ada jalur konstruksi yang bisa membuat sesi berjalan tanpa batas.
 
 Ketika budget habis, `spend()` melempar galat `BUDGET_EXCEEDED` dan sesi
 harus ditutup dengan `end_session` sebelum sesi baru dibuka.

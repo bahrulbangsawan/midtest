@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ScenarioStore } from '../src/scenarios.ts';
+import { ScenarioStore, hitungLangkahSkenario } from '../src/scenarios.ts';
 import { ToolError } from '../src/errors.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -52,6 +52,14 @@ test('nama yang mengandung pemisah path ditolak', async () => {
 interface HubungkanOpsi {
   /** Diprogram pada setiap FakeDevice sebelum tool call apa pun bisa memakainya. */
   failNext?: string;
+  /** Batas operasi AI per sesi; default 40 seperti server sungguhan. */
+  limit?: number;
+}
+
+/** YAML skenario dengan `jumlah` langkah `ai` di satu task. */
+function yamlDenganLangkah(jumlah: number): string {
+  const flow = Array.from({ length: jumlah }, (_, i) => `      - ai: langkah ${i + 1}`).join('\n');
+  return `tasks:\n  - name: alur\n    flow:\n${flow}\n`;
 }
 
 async function hubungkanDenganStore(opsi: HubungkanOpsi = {}) {
@@ -64,7 +72,7 @@ async function hubungkanDenganStore(opsi: HubungkanOpsi = {}) {
     }
     dibuat.push(device);
     return device;
-  }, 40);
+  }, opsi.limit ?? 40);
   const server = createServer({ sessions, store, buildDemoPath: BUILD_DEMO });
   const client = new Client({ name: 'test', version: '0' });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -121,6 +129,95 @@ test('run_scenario skenario tak dikenal mengembalikan SCENARIO_NOT_FOUND', async
   });
   assert.equal(hasil.isError, true);
   assert.match((hasil.content as any)[0].text, /SCENARIO_NOT_FOUND/);
+});
+
+// --- run_scenario tidak boleh lolos dari batas budget ---
+
+test('hitungLangkahSkenario menjumlahkan seluruh flow di semua task', () => {
+  assert.equal(hitungLangkahSkenario('tasks: []\n'), 0);
+  assert.equal(hitungLangkahSkenario('tasks:\n  - name: a\n'), 0);
+  assert.equal(hitungLangkahSkenario(yamlDenganLangkah(5)), 5);
+  assert.equal(
+    hitungLangkahSkenario(
+      'tasks:\n' +
+        '  - name: a\n    flow:\n      - ai: satu\n      - aiAssert: dua\n' +
+        '  - name: b\n    flow:\n      - sleep: 100\n      - aiWaitFor: tiga\n',
+    ),
+    4,
+    'langkah non-AI ikut dihitung — penjaga biaya harus membulatkan ke atas',
+  );
+});
+
+test('hitungLangkahSkenario melempar INTERNAL untuk YAML yang tidak bisa diurai', () => {
+  for (const rusak of ['tasks: [\n', 'halo: dunia\n', '']) {
+    assert.throws(
+      () => hitungLangkahSkenario(rusak),
+      (err: ToolError) => err.code === 'INTERNAL',
+      `YAML ${JSON.stringify(rusak)} harus ditolak, bukan diloloskan gratis`,
+    );
+  }
+});
+
+test('run_scenario memotong budget sebanyak langkah skenario', async () => {
+  const { client, store } = await hubungkanDenganStore({ limit: 10 });
+  await store.save('checkout', yamlDenganLangkah(3));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'checkout', target: 'web' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /Charged 3 of 10 AI operations\./);
+});
+
+test('run_scenario lebih panjang dari budget ditolak BUDGET_EXCEEDED tanpa dijalankan', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore({ limit: 2 });
+  await store.save('panjang', yamlDenganLangkah(5));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'panjang', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /BUDGET_EXCEEDED/);
+  assert.equal(dibuat.length, 0, 'device tidak boleh dibuka untuk skenario yang ditolak');
+});
+
+test('run_scenario berulang tidak bisa memutar skenario besar berkali-kali', async () => {
+  // Regresi langsung dari temuan: dengan limit 2, lima run_scenario berturut-turut
+  // dulu semuanya berhasil dan budget tidak tersentuh sama sekali.
+  const { client, store, dibuat } = await hubungkanDenganStore({ limit: 2 });
+  await store.save('panjang', yamlDenganLangkah(5));
+  for (let i = 0; i < 5; i += 1) {
+    const hasil = await client.callTool({
+      name: 'run_scenario',
+      arguments: { name: 'panjang', target: 'web' },
+    });
+    assert.equal(hasil.isError, true, `run ke-${i + 1} harus ditolak`);
+    assert.match((hasil.content as any)[0].text, /BUDGET_EXCEEDED/);
+  }
+  assert.equal(dibuat.length, 0, 'tidak satu pun sesi boleh dibuka');
+});
+
+test('run_scenario dengan YAML rusak ditolak dan tidak membuka sesi', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore();
+  await store.save('rusak-yaml', 'tasks: [\n');
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'rusak-yaml', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /INTERNAL/);
+  assert.equal(dibuat.length, 0);
+});
+
+test('run_scenario tepat sebesar budget masih boleh berjalan', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore({ limit: 4 });
+  await store.save('pas', yamlDenganLangkah(4));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'pas', target: 'web' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.deepEqual(dibuat[0].calls, [`runYaml:${yamlDenganLangkah(4)}`]);
 });
 
 test('list_scenarios mengembalikan nama tersimpan', async () => {
