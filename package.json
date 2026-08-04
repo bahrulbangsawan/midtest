@@ -1,0 +1,23 @@
+{
+  "name": "midscene-desktop",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "playground": "node --env-file=.env node_modules/@midscene/computer-playground/bin/computer-playground",
+    "example": "node --env-file=.env example.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@midscene/computer": "^1.10.8",
+    "@midscene/computer-playground": "^1.10.8"
+  },
+  "allowScripts": {
+    "node-mac-permissions@2.5.0": true,
+    "sharp@0.34.5": true
+  }
+}

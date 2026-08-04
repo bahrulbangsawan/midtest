@@ -1,0 +1,15 @@
+# Kredensial — jangan pernah di-commit
+.env
+.env.local
+
+# Dependensi
+node_modules/
+
+# Keluaran Midscene: report berisi screenshot layar, cache bersifat lokal
+midscene_run/
+
+# Build Tauri
+src-tauri/target/
+dist/
+
+.DS_Store
