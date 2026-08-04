@@ -15,3 +15,20 @@ export interface Device {
   reportPath(): string | undefined;
   end(): Promise<void>;
 }
+
+/** Options an MCP caller may supply when opening a session. */
+export interface DeviceOpts {
+  cacheId?: string;
+  url?: string;
+}
+
+/**
+ * The static shape every device adapter class must expose. `target` is a *static*
+ * member (the instance carries its own `target` too) so the factory can confirm the
+ * class it just loaded is the one it asked for — without constructing it, which would
+ * mean launching a browser or grabbing the desktop.
+ */
+export interface KelasAdapter {
+  readonly target: DeviceTarget;
+  open(opts: DeviceOpts): Promise<Device>;
+}

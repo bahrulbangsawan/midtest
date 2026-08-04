@@ -7,9 +7,16 @@ import { ScenarioStore } from './scenarios.ts';
 import { createDevice } from './devices/factory.ts';
 
 const root = process.env.MIDSCENE_MCP_ROOT ?? process.cwd();
-const budgetDiminta = Number(process.env.MIDSCENE_MCP_BUDGET);
-const budget =
-  Number.isFinite(budgetDiminta) && budgetDiminta > 0 ? budgetDiminta : DEFAULT_BUDGET;
+const budgetMentah = process.env.MIDSCENE_MCP_BUDGET;
+const budgetDiminta = Number(budgetMentah);
+const budgetSah = Number.isFinite(budgetDiminta) && budgetDiminta > 0;
+const budget = budgetSah ? budgetDiminta : DEFAULT_BUDGET;
+if (budgetMentah !== undefined && !budgetSah) {
+  // stderr only — stdout carries the JSON-RPC channel and must stay clean.
+  console.error(
+    `[midscene-mcp] ignoring invalid MIDSCENE_MCP_BUDGET=${JSON.stringify(budgetMentah)}; using the default of ${DEFAULT_BUDGET}. Expected a positive number.`,
+  );
+}
 
 const sessions = new SessionManager(
   (target, opts) => createDevice(target, { ...opts, cacheId: `midscene-mcp-${target}` }),

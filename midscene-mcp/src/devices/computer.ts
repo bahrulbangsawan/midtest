@@ -1,10 +1,13 @@
 import { agentForComputer } from '@midscene/computer';
-import type { Device, Screenshot } from './types.ts';
+import type { Device, DeviceOpts, KelasAdapter, Screenshot } from './types.ts';
 import { uraikanDataUriGambar } from './screenshot.ts';
 
 type ComputerAgent = Awaited<ReturnType<typeof agentForComputer>>;
 
 export class ComputerDeviceAdapter implements Device {
+  /** Static twin of the instance field, read by the factory before construction. */
+  static readonly target = 'computer' as const;
+
   readonly target = 'computer' as const;
 
   readonly #agent: ComputerAgent;
@@ -15,10 +18,12 @@ export class ComputerDeviceAdapter implements Device {
     this.#agent = agent;
   }
 
-  static async open(cacheId?: string): Promise<ComputerDeviceAdapter> {
+  static async open(opts: DeviceOpts = {}): Promise<ComputerDeviceAdapter> {
+    // `opts.url` is deliberately unused: a desktop session has no address to open.
+    // The start_session handler already tells the caller the url was ignored.
     const agent = await agentForComputer({
       aiActionContext: 'You are controlling a macOS desktop computer.',
-      ...(cacheId ? { cacheId } : {}),
+      ...(opts.cacheId ? { cacheId: opts.cacheId } : {}),
     });
     return new ComputerDeviceAdapter(agent);
   }
@@ -55,3 +60,7 @@ export class ComputerDeviceAdapter implements Device {
     await this.#agent.destroy();
   }
 }
+
+// Compile-time proof that the factory's runtime lookup finds what it expects.
+// Erased by type stripping.
+ComputerDeviceAdapter satisfies KelasAdapter;

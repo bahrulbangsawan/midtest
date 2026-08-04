@@ -1,8 +1,28 @@
 import puppeteer, { type Browser, type Page } from 'puppeteer';
 import { PuppeteerAgent } from '@midscene/web/puppeteer';
-import type { Device, Screenshot } from './types.ts';
+import type { Device, DeviceOpts, KelasAdapter, Screenshot } from './types.ts';
+
+/**
+ * Matches the human partner's proven script (`demo-registrasi.mjs`).
+ *
+ * Puppeteer's own default viewport is a frozen 800x600 at deviceScaleFactor 1,
+ * applied regardless of the OS window size. That is 3.6x fewer pixels than this,
+ * *before* Midscene's fixed q90 JPEG re-encode — and for a product whose entire
+ * output is readable visual documentation, that is not a marginal loss. Worse,
+ * 800 CSS px sits below common responsive breakpoints, so a nav control that the
+ * proven instruction clicks in the top-right corner may be collapsed behind a
+ * hamburger, making the MCP path fail a flow that already works.
+ *
+ * Midscene pins JPEG quality at 90 and exposes no setting for it, so
+ * deviceScaleFactor is the only sharpness lever: 2 yields 2880x1800.
+ */
+const VIEWPORT_BAWAAN = { width: 1440, height: 900, deviceScaleFactor: 2 } as const;
+const ARGS_BAWAAN = ['--window-size=1456,1000'];
 
 export class WebDeviceAdapter implements Device {
+  /** Static twin of the instance field, read by the factory before construction. */
+  static readonly target = 'web' as const;
+
   readonly target = 'web' as const;
 
   readonly #browser: Browser;
@@ -17,15 +37,17 @@ export class WebDeviceAdapter implements Device {
     this.#agent = agent;
   }
 
-  static async open(url?: string, cacheId?: string): Promise<WebDeviceAdapter> {
+  static async open(opts: DeviceOpts = {}): Promise<WebDeviceAdapter> {
     const browser = await puppeteer.launch({
       headless: false,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+      defaultViewport: { ...VIEWPORT_BAWAAN },
+      args: [...ARGS_BAWAAN],
     });
     try {
       const page = await browser.newPage();
-      if (url) await page.goto(url, { waitUntil: 'domcontentloaded' });
-      const agent = new PuppeteerAgent(page, cacheId ? { cacheId } : {});
+      if (opts.url) await page.goto(opts.url, { waitUntil: 'domcontentloaded' });
+      const agent = new PuppeteerAgent(page, opts.cacheId ? { cacheId: opts.cacheId } : {});
       return new WebDeviceAdapter(browser, page, agent);
     } catch (err) {
       await browser.close().catch(() => {});
@@ -72,3 +94,7 @@ export class WebDeviceAdapter implements Device {
     }
   }
 }
+
+// Compile-time proof that the factory's runtime lookup finds what it expects.
+// Erased by type stripping.
+WebDeviceAdapter satisfies KelasAdapter;
