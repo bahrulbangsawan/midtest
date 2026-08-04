@@ -11,12 +11,13 @@ const EVENT_AGENT_DISCONNECTED = 'agent-disconnected';
 /**
  * Agen yang dipakai jendela ini.
  *
- * `bin` diulang di sisi webview dengan sengaja: `connect_agent` mengembalikan
- * kalimat galat yang tidak menyebut nama binernya (lihat `user_message` di
- * `commands.rs`), padahal "biner mana yang harus saya pasang" adalah satu-satunya
- * hal yang ingin diketahui pengguna ketika sambungannya gagal.
+ * Sengaja tidak menyimpan `bin`: nama biner adapter cuma dan pernah
+ * didefinisikan di `agents.rs` (lihat `AgentSpec` dan `missing_binary_message`).
+ * `connect_agent` sudah mengembalikan kalimat galat lengkap — termasuk nama
+ * biner dan cara memasangnya — sehingga tidak ada lagi salinan untuk
+ * ditempelkan di sini.
  */
-const AGEN = { id: 'claude', label: 'Claude', bin: 'claude-agent-acp' } as const;
+const AGEN = { id: 'claude', label: 'Claude' } as const;
 
 /** Bentuk `AgentInfo` dari `commands.rs`, diserialisasi camelCase. */
 interface AgentInfo {
@@ -85,10 +86,11 @@ function App() {
       },
       (penyebab: unknown) => {
         setStatus('gagal');
-        setGalat(
-          `Agen ${AGEN.label} gagal disambungkan: ${String(penyebab)} ` +
-            `Pastikan biner "${AGEN.bin}" sudah terpasang dan bisa ditemukan di PATH.`,
-        );
+        // Rust sudah merangkai kalimat lengkap — termasuk nama biner dan cara
+        // memasangnya bila itu sebabnya (lihat `missing_binary_message` di
+        // `agents.rs`). Tampilkan apa adanya; menambal di sini berarti dua
+        // sumber kebenaran untuk satu nama biner.
+        setGalat(String(penyebab));
       },
     );
   }, []);

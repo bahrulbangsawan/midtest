@@ -41,6 +41,7 @@ async fn connect_menyerah_bila_adapter_tak_pernah_menjawab() {
         id: "diam",
         label: "Adapter membisu",
         bin: "/usr/bin/tail",
+        npm_package: "tidak-dipakai-di-test-ini",
     };
     let anggaran = Duration::from_millis(400);
 

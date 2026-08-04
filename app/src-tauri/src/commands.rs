@@ -50,7 +50,7 @@ use crate::acp::{
     AcpError, AcpHandle, ClientContext, EVENT_AGUI, EventSink, InitializeResponseExt, connect,
     new_session,
 };
-use crate::agents::{AgentSpec, find_agent};
+use crate::agents::{AgentSpec, find_agent, missing_binary_message, probe};
 use crate::settings;
 use crate::sidecar::midscene_server;
 
@@ -202,6 +202,20 @@ pub struct AgentInfo {
     pub supports_image_prompt: bool,
 }
 
+/// Pencari PATH sungguhan dipakai [`connect_agent`] di produksi.
+///
+/// Fungsi biasa, bukan closure inline, supaya bisa diteruskan sebagai `&dyn
+/// Fn` — persis bentuk yang [`connect_agent_body`] terima di test lewat
+/// pencari palsu. [`agents::probe`] sendiri sudah menerima closure ini demi
+/// alasan yang sama; lihat dokumentasi di sana.
+fn real_path_lookup(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(bin);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
 /// Jalankan adapter `agent_id`, selesaikan handshake, dan buka sesi dengan
 /// sidecar Midscene terdaftar sebagai server MCP.
 ///
@@ -215,8 +229,40 @@ pub async fn connect_agent(
     state: State<'_, AppState>,
     agent_id: String,
 ) -> Result<AgentInfo, String> {
+    connect_agent_body(&state, agent_id, &real_path_lookup).await
+}
+
+/// Badan [`connect_agent`], bebas dari `State` milik Tauri dan dari pencari
+/// PATH sungguhan.
+///
+/// Dipisahkan dengan alasan yang sama seperti [`run_turn`] dan
+/// [`cancel_turn_body`]: satu-satunya cara membuktikan bahwa biner yang
+/// hilang **tidak pernah** sampai ke [`connect`] adalah menjalankan jalur ini
+/// dengan pencari palsu yang selalu mengembalikan `None`, tanpa bergantung
+/// pada — atau mengubah — PATH mesin yang menjalankan test.
+///
+/// `probe` dipanggil **sebelum** sesi lama ditutup dan sebelum [`connect`]
+/// dipanggil: agen tujuan yang binernya hilang tidak boleh merobohkan sesi
+/// yang sedang berjalan, dan tidak boleh sampai men-spawn apa pun.
+///
+/// # Errors
+///
+/// Kalimat berbahasa Indonesia yang siap ditampilkan:
+/// - id agen tak dikenal → menyebut id itu;
+/// - biner adapter tak ditemukan → [`missing_binary_message`], berbeda dari
+///   galat protokol mana pun yang dihasilkan [`user_message`];
+/// - kegagalan setelahnya → lihat [`user_message`].
+async fn connect_agent_body(
+    state: &AppState,
+    agent_id: String,
+    path_lookup: &(dyn Fn(&str) -> Option<PathBuf> + Send + Sync),
+) -> Result<AgentInfo, String> {
     let spec: &'static AgentSpec =
         find_agent(&agent_id).ok_or_else(|| format!("Agen \"{agent_id}\" tidak dikenal."))?;
+
+    if !probe(spec.bin, path_lookup) {
+        return Err(missing_binary_message(spec));
+    }
 
     let mut guard = state.session.lock().await;
     if let Some(previous) = guard.take() {
@@ -611,6 +657,58 @@ mod tests {
         assert_eq!(json["threadId"], "sesi-1");
         assert_eq!(json["supportsImagePrompt"], true);
         assert!(json.get("session_id").is_none());
+    }
+
+    // -------------------------------------------- deteksi biner adapter
+
+    /// Menyambung dengan id agen yang tidak dikenal wajib menyebut id itu di
+    /// pesannya — pengguna butuh tahu persis apa yang salah ketik.
+    #[tokio::test]
+    async fn connect_agent_dengan_id_tak_dikenal_menyebut_id_itu() {
+        let (state, _events) = state_uji();
+        // Pencari tidak relevan di jalur ini: `find_agent` gagal duluan.
+        let tak_dipanggil = |_: &str| panic!("path_lookup tidak boleh dipanggil untuk id tak dikenal");
+
+        let galat = connect_agent_body(&state, "agen-siluman".into(), &tak_dipanggil)
+            .await
+            .expect_err("id tak dikenal harus ditolak");
+
+        assert!(galat.contains("agen-siluman"), "dapat: {galat}");
+    }
+
+    /// **Inti perbaikan Task 6.** Sebelum `probe` dipanggil di jalur ini,
+    /// biner yang hilang tidak pernah tertangkap di sini sama sekali — ia
+    /// jatuh ke `connect` dan muncul sebagai galat protokol yang menyesatkan.
+    /// Test ini menuntut dua hal sekaligus: pesannya menyebut nama biner
+    /// sungguhan dari registry (bukan salinan hardcoded), dan pesannya
+    /// **berbeda** dari galat protokol mana pun — kalau keduanya sama,
+    /// pengguna tidak belajar apa-apa dan perbaikan ini tidak berguna.
+    ///
+    /// Pencari palsu (`kosong`) dipakai justru supaya test ini tidak
+    /// bergantung pada apakah `claude-agent-acp` sungguhan terpasang di
+    /// mesin yang menjalankannya.
+    #[tokio::test]
+    async fn connect_agent_dengan_biner_hilang_menyebut_biner_dan_beda_dari_galat_protokol() {
+        let (state, _events) = state_uji();
+        let kosong = |_: &str| None;
+
+        let galat = connect_agent_body(&state, "claude".into(), &kosong)
+            .await
+            .expect_err("biner hilang harus ditolak sebelum menyambung");
+
+        assert!(galat.contains("claude-agent-acp"), "dapat: {galat}");
+        assert!(galat.contains("npm install"), "dapat: {galat}");
+        assert!(
+            galat.contains("@agentclientprotocol/claude-agent-acp"),
+            "dapat: {galat}"
+        );
+
+        let galat_protokol = user_message(&AcpError::HandshakeTimeout(Duration::from_secs(30)));
+        assert_ne!(
+            galat, galat_protokol,
+            "pesan biner hilang wajib berbeda dari galat protokol, kalau tidak pengguna \
+             tidak belajar apa-apa dari perbaikan ini"
+        );
     }
 
     // ------------------------------------------------ siklus hidup giliran

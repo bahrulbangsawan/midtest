@@ -135,7 +135,15 @@ test('hasil connect_agent yang sukses sampai ke status walau melewati mount gand
 test('kegagalan connect_agent sampai ke layar sebagai pesan, bukan diam', async () => {
   await renderDalamStrictMode();
 
-  tauri.connect?.reject('Biner tidak ditemukan.');
+  // Pesan yang sama seperti yang sungguhan dirangkai `missing_binary_message`
+  // di `agents.rs`: sudah lengkap dengan nama biner dan cara memasangnya.
+  // Frontend tidak lagi menambal apa pun ke pesan ini — lihat komentar di
+  // `App.tsx` — jadi test ini menegaskan pesan itu tampil **apa adanya**.
+  const PESAN_DARI_RUST =
+    'Biner adapter "claude-agent-acp" untuk agen Claude tidak ditemukan di PATH. ' +
+    'Pasang lebih dulu dengan `npm install -g @agentclientprotocol/claude-agent-acp`, ' +
+    'lalu coba sambungkan lagi.';
+  tauri.connect?.reject(PESAN_DARI_RUST);
 
   await waitFor(() => {
     expect(screen.getByText('Gagal tersambung')).toBeDefined();
@@ -145,6 +153,9 @@ test('kegagalan connect_agent sampai ke layar sebagai pesan, bukan diam', async 
   // separuh kedua dari bug ini: sebelum perbaikan, kedua jalur sama-sama
   // berakhir di layar yang tidak berubah sama sekali.
   const kabar = screen.getByRole('alert');
-  expect(kabar.textContent).toContain('Biner tidak ditemukan.');
+  // Sama persis, bukan sekadar "mengandung": buktinya frontend tidak lagi
+  // menambahkan atau memotong apa pun dari kalimat yang dikirim Rust.
+  expect(kabar.textContent).toBe(PESAN_DARI_RUST);
   expect(kabar.textContent).toContain('claude-agent-acp');
+  expect(kabar.textContent).toContain('npm install');
 });

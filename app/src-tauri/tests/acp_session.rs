@@ -96,6 +96,7 @@ async fn new_session_menyerah_bila_agen_tak_pernah_menjawab() {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/agen-bisu-setelah-initialize.mjs"
         ),
+        npm_package: "tidak-dipakai-di-test-ini",
     };
     let akar = akar_repo();
     let anggaran = Duration::from_millis(400);
