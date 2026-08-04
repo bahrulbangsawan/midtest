@@ -23,8 +23,13 @@ sebagai proyek open source.
 
 **Grounding.** Screenshot → koordinat elemen. Butuh VLM dengan kemampuan
 grounding. Family yang didukung terbatas dan formatnya di-parse langsung oleh
-Midscene: `gpt-4o`, `qwen2.5-vl`, `qwen3-vl`, `doubao-vision`, `doubao-seed`,
-`gemini`. Agen coding tidak bisa menggantikan peran ini.
+Midscene — `MODEL_FAMILY_VALUES` di `@midscene/shared@1.10.8` (versi yang
+dipakai `midscene-mcp`; daftar ini bisa berubah di versi lain, cek
+`node_modules/@midscene/shared/dist/lib/env/types.js`): `doubao-vision`,
+`doubao-seed`, `gemini`, `qwen2.5-vl`, `qwen3-vl`, `qwen3`, `qwen3.5`,
+`qwen3.6`, `vlm-ui-tars`, `vlm-ui-tars-doubao`, `vlm-ui-tars-doubao-1.5`,
+`glm-v`, `auto-glm`, `auto-glm-multilingual`, `gpt-5`, `kimi`, `kimi3`,
+`xiaomi-mimo`. Agen coding tidak bisa menggantikan peran ini.
 
 **Perencanaan.** Memecah permintaan jadi urutan langkah, menulis skenario,
 menyusun narasi dokumentasi. Ini yang dikerjakan agen ACP.

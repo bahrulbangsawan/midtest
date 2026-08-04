@@ -16,10 +16,15 @@ mendukung protokolnya.
   `.ts` langsung — tidak ada langkah build).
 - **Google Chrome** terpasang (dipakai lewat Puppeteer untuk target `web`).
 - **API key model VLM berbayar** dari salah satu family yang didukung
-  Midscene: `gpt-4o`, `qwen2.5-vl`, `qwen3-vl`, `doubao-vision`,
-  `doubao-seed`, atau `gemini`. Ini kunci milikmu sendiri, terpisah dari
-  langganan Codex CLI atau Claude Code — baca bagian [Biaya](#biaya) di
-  bawah untuk alasannya.
+  Midscene (`MODEL_FAMILY_VALUES` di `@midscene/shared@1.10.8`, versi yang
+  dipakai `midscene-mcp` — daftar ini bisa berubah di versi lain, cek
+  `node_modules/@midscene/shared/dist/lib/env/types.js`): `doubao-vision`,
+  `doubao-seed`, `gemini`, `qwen2.5-vl`, `qwen3-vl`, `qwen3`, `qwen3.5`,
+  `qwen3.6`, `vlm-ui-tars`, `vlm-ui-tars-doubao`, `vlm-ui-tars-doubao-1.5`,
+  `glm-v`, `auto-glm`, `auto-glm-multilingual`, `gpt-5`, `kimi`, `kimi3`,
+  `xiaomi-mimo`. Ini kunci milikmu sendiri, terpisah dari langganan Codex
+  CLI atau Claude Code — baca bagian [Biaya](#biaya) di bawah untuk
+  alasannya.
 
 ## Konfigurasi
 
@@ -36,7 +41,7 @@ Variabel yang tersedia:
 | `MIDSCENE_MODEL_BASE_URL` | Endpoint API model VLM |
 | `MIDSCENE_MODEL_API_KEY` | API key model VLM |
 | `MIDSCENE_MODEL_NAME` | Nama model spesifik dari provider |
-| `MIDSCENE_MODEL_FAMILY` | Salah satu dari enam family yang didukung |
+| `MIDSCENE_MODEL_FAMILY` | Salah satu family yang didukung — lihat daftar di [Prasyarat](#prasyarat) |
 | `MIDSCENE_CACHE` | Set ke `1` untuk mengaktifkan cache Midscene |
 | `PUPPETEER_EXECUTABLE_PATH` | Path ke binary Chrome (perlu di Apple Silicon karena Chrome bawaan Puppeteer tidak ter-sign dengan benar) |
 | `MIDSCENE_MCP_BUDGET` | Batas operasi AI per sesi eksplorasi (default 40) |
@@ -103,7 +108,7 @@ skenario/narasi — itu bagian yang tercakup langganan. Tapi grounding visual
 Midscene (screenshot → koordinat elemen) dikerjakan VLM terpisah, dan itu
 ditagih terpisah lewat API key sendiri.
 
-Yang benar-benar menghemat biaya adalah **cache Midscine**: run eksplorasi
+Yang benar-benar menghemat biaya adalah **cache Midscene**: run eksplorasi
 pertama membayar penuh, tapi run replay berikutnya lewat cache nyaris
 gratis.
 
@@ -139,7 +144,10 @@ melaporkan `UNMET DEPENDENCY` untuk keduanya walau di runtime keduanya
 tetap ter-resolve dengan benar via hoisting. Ini **bukan berarti paket ini
 terpasang bersih secara standalone** — install-nya masih bergantung pada
 `npm install` yang dijalankan di root repo. Konversi ke npm workspaces
-sudah direncanakan untuk membereskan ini, tapi belum dikerjakan.
+sudah direncanakan untuk membereskan ini — pending semata karena root repo
+punya perubahan uncommitted (`package.json`, `package-lock.json`, dan lain-
+lain) yang harus landing dulu sebelum konversi itu bisa dikerjakan tanpa
+menabrak pekerjaan yang belum di-commit.
 
 ## Menjalankan tes
 
