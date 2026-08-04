@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.ts';
 import { SessionManager } from '../src/session.ts';
 import { FakeDevice } from '../src/devices/fake.ts';
+import { ScenarioStore } from '../src/scenarios.ts';
 
 async function hubungkan(limit = 40) {
   const dibuat: FakeDevice[] = [];
@@ -14,7 +18,8 @@ async function hubungkan(limit = 40) {
     return device;
   }, limit);
 
-  const server = createServer({ sessions });
+  const store = new ScenarioStore(await mkdtemp(join(tmpdir(), 'skenario-')));
+  const server = createServer({ sessions, store });
   const client = new Client({ name: 'test', version: '0' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
