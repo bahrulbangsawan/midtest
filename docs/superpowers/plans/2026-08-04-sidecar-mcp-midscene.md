@@ -62,20 +62,56 @@ printf '%s\n' \
 
 Catat balasan `initialize` secara utuh — khususnya `agentCapabilities` dan `promptCapabilities`.
 
-Sinyal awal (2026-08-04, dari README repo, **belum diverifikasi di tingkat protokol**):
-README `agentclientprotocol/claude-agent-acp` mencantumkan "Client MCP servers" sebagai
-fitur yang didukung. Menguatkan, tapi bukan bukti — daftar fitur bukan konfirmasi protokol.
+### TERJAWAB — dijalankan 2026-08-04 pada `claude-agent-acp` 0.64.2
 
-**Pertanyaan baru yang harus ikut dijawab di langkah ini.** Repo menyebut dirinya
-"ACP Adapter for Claude Agent SDK", bukan pembungkus Claude Code CLI, dan README-nya
-tidak menyebut apa pun soal autentikasi. Seluruh penalaran kepatuhan ToS di spec
-dibangun di atas pola Zed: aplikasi mengemudikan install Claude Code milik pengguna
-dengan login pengguna sendiri. Bila adapter ini justru berbasis Agent SDK yang menuntut
-API key, premis itu berubah untuk sisi Claude — dan bagian "Kepatuhan terhadap ketentuan
-langganan" di spec harus ditulis ulang untuk agen tersebut.
+Balasan `initialize` sebenarnya:
 
-Catat: apakah ia memakai kredensial Claude Code yang sudah ada, atau menuntut
-`ANTHROPIC_API_KEY` tersendiri.
+```json
+{"protocolVersion":1,
+ "agentCapabilities":{
+   "promptCapabilities":{"image":true,"embeddedContext":true},
+   "mcpCapabilities":{"http":true,"sse":true},
+   "auth":{"logout":{}},"loadSession":true,
+   "sessionCapabilities":{"additionalDirectories":{},"close":{},"delete":{},
+                          "fork":{},"list":{},"resume":{}}},
+ "agentInfo":{"name":"@agentclientprotocol/claude-agent-acp","version":"0.64.2"},
+ "authMethods":[]}
+```
+
+**`mcpServers` didukung, termasuk stdio.** `mcpCapabilities` hanya mendeklarasikan
+transport *tambahan* di luar stdio baseline. Terbukti dari kode pemetaan di
+`dist/acp-agent.js`:
+
+```js
+if ("type" in server && (server.type === "http" || server.type === "sse")) { ... }
+else if (!("type" in server)) { /* stdio: command, args, env */ }
+```
+
+**JEBAKAN — WAJIB DIPATUHI RENCANA 2.** Cabang stdio adalah `else if (!("type" in server))`.
+Klien yang mengirim `{ "type": "stdio", "command": ..., "args": [...] }` dengan field
+`type` eksplisit **tidak cocok dengan cabang mana pun dan server MCP-nya dibuang tanpa
+error**. Agen akan berjalan tanpa tool Midscene sama sekali, dan tidak ada yang melapor.
+Klien ACP di Rust **harus menghilangkan** field `type` untuk server stdio.
+Tulis test integrasi yang menegaskan tool Midscene benar-benar muncul di sesi — jangan
+percaya bahwa `session/new` yang sukses berarti server-nya terpasang.
+
+**Gambar didukung** — `promptCapabilities.image: true`. Pertanyaan terbuka soal apakah
+agen bisa menerima screenshot terjawab untuk sisi Claude.
+
+**Auth: API key TIDAK diwajibkan.** `ANTHROPIC_API_KEY` hanya muncul di daftar
+`PROVIDER_ROUTING_ENV_VARS` yang dipakai untuk scoping cache, bukan sebagai kredensial
+wajib. `authMethods: []` dengan kapabilitas `auth.logout` hadir, dan `systemPrompt`
+memakai preset `"claude_code"` — mengarah ke pemakaian kredensial Claude Code yang sudah
+ada di mesin. **Belum dibuktikan** dengan menjalankan sesi sungguhan; itu memakai kuota.
+Premis kepatuhan ToS di spec tetap berlaku sejauh bukti ini, tapi konfirmasi akhirnya
+adalah satu prompt yang benar-benar jalan.
+
+**Bonus untuk Rencana 2:** `sessionCapabilities` menyediakan `fork`, `resume`, `list`,
+`close`, `delete`, dan `additionalDirectories`; `loadSession: true`. Riwayat percakapan
+persisten yang ditunda dari v1 ternyata didukung agen secara native.
+
+Catatan: paket ini membundel `@anthropic-ai/claude-agent-sdk` — memang adapter Agent SDK,
+bukan pembungkus Claude Code CLI, persis seperti klaim repo-nya.
 
 - [ ] **Step 3: Periksa API connection kustom TanStack AI**
 
