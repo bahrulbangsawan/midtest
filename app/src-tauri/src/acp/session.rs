@@ -21,10 +21,39 @@
 //!   langsung — pola yang sama dengan `initialize` di [`super::connect_with_timeout`].
 
 use std::path::Path;
+use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{McpServer, NewSessionRequest, SessionId};
 
 use super::{AcpError, AcpHandle, resolve_cwd};
+
+/// Batas waktu bawaan untuk menunggu balasan `session/new`.
+///
+/// `session/new` bukan sekadar pencatatan: di situlah agen benar-benar
+/// **men-spawn setiap server MCP** yang kita daftarkan lalu menunggunya siap.
+/// Karena itu ia mewarisi penyakit yang sama dengan `initialize` —
+/// `block_task` hanya selesai bila ada balasan, pembatalan, atau EOF — tetapi
+/// dengan permukaan kegagalan yang lebih luas: `node` yang hidup tapi
+/// menggantung (`.env` di mount yang macet, `import` yang tak pernah selesai)
+/// tidak menghasilkan balasan **dan** tidak menghasilkan EOF. Tanpa batas ini
+/// perintah Tauri yang menunggunya membekukan chat tanpa jalur error, dan
+/// `cargo test` menggantung tanpa akhir.
+///
+/// Dua menit, dan angkanya diukur bukan ditebak. Pada mesin ini `session/new`
+/// dengan satu sidecar Midscene yang cache-nya panas memakan **2,26 detik**
+/// (diukur langsung, di luar `connect` yang 0,44 detik). Anggaran harus menutup
+/// kasus terburuk yang masih sah, dan regimenya berbeda dari dua anggaran lain
+/// di sistem ini: `node` start dingin yang memuat graf dependensi
+/// `puppeteer` + `@midscene/web` (lihat `midscene-mcp/package.json`) sambil
+/// menanggalkan tipe TypeScript, dikali jumlah server yang didaftarkan, karena
+/// agen menyalakan semuanya dalam satu permintaan ini. Itu jauh lebih berat
+/// daripada [`super::DEFAULT_HANDSHAKE_TIMEOUT`] (30 detik, yang hanya menunggu
+/// satu biner adapter menjawab) dan sama sekali bukan ukuran yang sama dengan
+/// `SHUTDOWN_TIMEOUT` (5 detik, pembersihan, bukan start dingin).
+/// 120 detik memberi sekitar 50× ruang di atas biaya terukur. Timeout palsu di
+/// sini merusak lebih parah daripada spinner panjang: ia membuat sesi tidak
+/// pernah bisa dibuat sama sekali, yaitu seluruh fungsi aplikasi ini.
+pub const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Susun permintaan `session/new`.
 ///
@@ -44,21 +73,47 @@ fn request(cwd: &Path, servers: Vec<McpServer>) -> Result<NewSessionRequest, Acp
 ///
 /// # Errors
 ///
-/// Mengembalikan [`AcpError::InvalidCwd`] bila `cwd` tidak ada atau tidak bisa
-/// di-canonicalize, dan [`AcpError::Protocol`] bila agen menolak `session/new`
-/// (misalnya karena butuh autentikasi) atau koneksinya sudah putus.
+/// Lihat [`new_session_with_timeout`].
 pub async fn new_session(
     handle: &AcpHandle,
     cwd: &Path,
     servers: Vec<McpServer>,
 ) -> Result<SessionId, AcpError> {
-    let response = handle
+    new_session_with_timeout(handle, cwd, servers, DEFAULT_SESSION_TIMEOUT).await
+}
+
+/// Seperti [`new_session`], tetapi dengan batas waktu yang ditentukan pemanggil.
+///
+/// Anggarannya disuntikkan dengan bentuk yang sama seperti
+/// [`super::connect_with_timeout`], dan alasannya sama: test tidak boleh
+/// menunggu dua menit hanya untuk membuktikan batas waktunya bekerja.
+///
+/// # Errors
+///
+/// Mengembalikan [`AcpError::InvalidCwd`] bila `cwd` tidak ada atau tidak bisa
+/// di-canonicalize, [`AcpError::Protocol`] bila agen menolak `session/new`
+/// (misalnya karena butuh autentikasi) atau koneksinya sudah putus, dan
+/// [`AcpError::SessionTimeout`] bila agen tidak menjawab dalam `budget`.
+pub async fn new_session_with_timeout(
+    handle: &AcpHandle,
+    cwd: &Path,
+    servers: Vec<McpServer>,
+    budget: Duration,
+) -> Result<SessionId, AcpError> {
+    let sent = handle
         .connection()
         .send_request(request(cwd, servers)?)
-        .block_task()
-        .await?;
+        .block_task();
 
-    Ok(response.session_id)
+    // Men-drop future yang belum selesai inilah yang membatalkan permintaannya:
+    // `SentRequest` memasang `SentRequestCancellation` yang mengirim pembatalan
+    // ke agen saat di-drop (`agent-client-protocol-2.0.0/src/jsonrpc.rs:3375`).
+    // Jadi koneksinya tetap sehat setelah timeout — yang gugur hanya satu
+    // permintaan, bukan seluruh handle.
+    match tokio::time::timeout(budget, sent).await {
+        Ok(response) => Ok(response?.session_id),
+        Err(_) => Err(AcpError::SessionTimeout(budget)),
+    }
 }
 
 #[cfg(test)]

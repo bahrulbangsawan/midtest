@@ -15,7 +15,7 @@
 pub mod client;
 pub mod session;
 
-pub use session::new_session;
+pub use session::{DEFAULT_SESSION_TIMEOUT, new_session, new_session_with_timeout};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,22 @@ pub enum AcpError {
     ConnectionClosed(String),
     /// Adapter hidup tetapi tidak menjawab `initialize` dalam batas waktu.
     HandshakeTimeout(Duration),
+    /// Adapter sudah selesai handshake tetapi tidak menjawab `session/new`
+    /// dalam batas waktu — biasanya karena salah satu server MCP yang ia
+    /// spawn tidak pernah siap.
+    ///
+    /// Sengaja **varian tersendiri**, bukan perluasan [`Self::HandshakeTimeout`],
+    /// karena keduanya menunjuk kesalahan yang berbeda dan obat yang berbeda.
+    /// `HandshakeTimeout` berarti biner adapter-nya sendiri rusak atau tersangkut
+    /// — periksa pemasangan adapter. `SessionTimeout` berarti adapter sehat
+    /// (ia sudah menjawab `initialize`) tetapi sesuatu yang *ia* jalankan macet —
+    /// periksa sidecar MCP, `node`, dan `.env`. Menggabungkan keduanya menjadi
+    /// satu `Timeout { fase, anggaran }` akan memaksa pemanggil menyimpulkan
+    /// sendiri fase mana yang gagal, sementara Task 5/6 justru perlu menampilkan
+    /// dua pesan yang berbeda. Sebagai bonus, [`AcpError`] sengaja bukan
+    /// `#[non_exhaustive]`, jadi varian baru ini otomatis menagih setiap `match`
+    /// ekshaustif untuk memutuskan — itu sifat pengaman yang bekerja, bukan ongkos.
+    SessionTimeout(Duration),
     /// `cwd` tidak bisa dijadikan path absolut yang sah.
     InvalidCwd {
         /// Path yang diberikan pemanggil.
@@ -82,6 +98,11 @@ impl fmt::Display for AcpError {
                 f,
                 "adapter tidak menjawab initialize dalam {budget:?}",
             ),
+            Self::SessionTimeout(budget) => write!(
+                f,
+                "adapter tidak menjawab session/new dalam {budget:?}; \
+                 kemungkinan besar salah satu server MCP tidak pernah siap",
+            ),
             Self::InvalidCwd { path, source } => write!(
                 f,
                 "direktori kerja {} tidak bisa dipakai: {source}",
@@ -96,7 +117,7 @@ impl std::error::Error for AcpError {
         match self {
             Self::Protocol(error) => Some(error),
             Self::InvalidCwd { source, .. } => Some(source),
-            Self::ConnectionClosed(_) | Self::HandshakeTimeout(_) => None,
+            Self::ConnectionClosed(_) | Self::HandshakeTimeout(_) | Self::SessionTimeout(_) => None,
         }
     }
 }
@@ -387,6 +408,20 @@ mod tests {
             error.to_string().contains("/jalur/yang/pasti/tidak/ada"),
             "pesan harus menyebut path yang salah: {error}"
         );
+    }
+
+    /// Alasan `SessionTimeout` berdiri sendiri, bukan memperluas
+    /// `HandshakeTimeout`, adalah supaya pemanggil bisa membedakan "adapternya
+    /// yang rusak" dari "sesuatu yang adapter jalankan yang macet". Itu hanya
+    /// berguna bila pesannya memang berbeda, jadi dikunci di sini.
+    #[test]
+    fn pesan_timeout_membedakan_fase_handshake_dari_fase_sesi() {
+        let handshake = AcpError::HandshakeTimeout(Duration::from_secs(1)).to_string();
+        let sesi = AcpError::SessionTimeout(Duration::from_secs(1)).to_string();
+
+        assert!(handshake.contains("initialize"), "dapat: {handshake}");
+        assert!(sesi.contains("session/new"), "dapat: {sesi}");
+        assert_ne!(handshake, sesi);
     }
 
     #[test]
