@@ -348,11 +348,111 @@ pub fn get_full_permissions(state: State<'_, AppState>) -> bool {
     state.ctx.full_permissions()
 }
 
+/// Kalimat untuk kegagalan menyimpan, **disesuaikan dengan arah perubahannya**.
+///
+/// Satu kalimat tetap untuk kedua arah pernah dipakai di sini, dan itu keliru
+/// justru ke arah yang berbahaya: saat pengguna **mematikan** mode dan
+/// penyimpanan gagal, kalimat itu berbunyi "mode izin penuh berlaku sekarang" —
+/// kebalikan dari yang terjadi — sambil menyebut akibatnya sekadar "tidak akan
+/// bertahan". Akibat sebenarnya jauh lebih mendesak: berkas di diska masih
+/// berisi `true`, jadi [`crate::run`] membacanya lagi saat peluncuran
+/// berikutnya dan persetujuan otomatis menyala sendiri tanpa diminta.
+///
+/// `tersimpan` adalah nilai yang **benar-benar** akan terbaca nanti — `None`
+/// bila kita bahkan tidak bisa mengetahuinya. Dengan begitu kalimatnya
+/// menjanjikan apa yang akan terjadi, bukan menebaknya.
+fn persist_failure_message(enabled: bool, tersimpan: Option<bool>, detail: &str) -> String {
+    let pembuka = if enabled {
+        "Mode izin penuh menyala sekarang"
+    } else {
+        "Mode izin penuh sudah mati sekarang"
+    };
+
+    let akibat = match tersimpan {
+        // Berkasnya kebetulan sudah berisi pilihan yang sama. Penyimpanan tetap
+        // gagal (dan itu tetap layak dilaporkan), tetapi peluncuran berikutnya
+        // tidak akan menyimpang.
+        Some(t) if t == enabled => {
+            "Untungnya berkas pengaturan yang ada sudah berisi pilihan yang sama, \
+             jadi peluncuran berikutnya tetap sesuai. Tetap periksa penyimpanannya."
+                .to_owned()
+        }
+        // Arah berbahaya: pengguna mematikan, diska masih menyala.
+        Some(true) => "PERINGATAN: pengaturan lama yang tersimpan masih menyala, jadi begitu aplikasi \
+             ditutup dan dibuka lagi mode ini akan menyala sendiri dan permintaan izin kembali \
+             disetujui otomatis tanpa bertanya. Matikan lagi setelah masalah penyimpanan diperbaiki."
+            .to_owned(),
+        // Arah aman: pengguna menyalakan, diska masih mati.
+        Some(false) => "Saat aplikasi dibuka lagi mode ini akan kembali mati dan setiap permintaan izin \
+             akan ditanyakan seperti biasa."
+            .to_owned(),
+        None if enabled => "Pengaturan tersimpan tidak bisa dibaca maupun ditulis, jadi mode ini mungkin \
+             tidak berlaku lagi saat aplikasi dibuka kembali."
+            .to_owned(),
+        None => "PERINGATAN: pengaturan tersimpan tidak bisa dibaca maupun ditulis, jadi mode ini bisa \
+             menyala sendiri saat aplikasi dibuka kembali. Periksa lagi setelah masalah \
+             penyimpanan diperbaiki."
+            .to_owned(),
+    };
+
+    format!("{pembuka}, tetapi pilihannya gagal disimpan: {detail}. {akibat}")
+}
+
+/// Pasang flag lalu simpan pilihannya — dalam urutan itu.
+///
+/// Dipisahkan dari [`set_full_permissions`] dan bebas dari `AppHandle` semata
+/// supaya **urutannya bisa diuji**. Tanpa fungsi ini, refactor yang menukar
+/// urutannya menjadi `settings::save(…)?; set_flag(enabled);` akan
+/// mengembalikan persis cacat yang urutan ini hindari, dan seluruh suite tetap
+/// hijau.
+///
+/// # Errors
+///
+/// Bila berkas gagal ditulis. Flag di memori **tetap berubah** dalam kasus itu;
+/// lihat catatan di [`set_full_permissions`].
+fn apply_and_persist_full_permissions(
+    dir: &Path,
+    enabled: bool,
+    set_flag: impl FnOnce(bool),
+) -> Result<(), String> {
+    // Flag lebih dulu, dan itu bukan kelalaian. Arah **mematikan** adalah arah
+    // yang menambah keamanan, dan ia harus berlaku seketika meskipun diska
+    // menolak ditulisi. Menyimpan lebih dulu lalu `?` berarti permintaan
+    // "matikan persetujuan otomatis" ditolak gara-gara berkas pengaturan, dan
+    // agen terus menyetujui sendiri sepanjang sesi.
+    set_flag(enabled);
+
+    settings::save(
+        dir,
+        &settings::Settings {
+            full_permissions: enabled,
+        },
+    )
+    .map_err(|error| {
+        // `load` infalibel, jadi aman dipanggil di jalur galat: ia memberi tahu
+        // kita apa yang **sungguh** akan terbaca pada peluncuran berikutnya.
+        let tersimpan = settings::load(dir).full_permissions;
+        persist_failure_message(enabled, Some(tersimpan), &format!("{error} ({})", dir.display()))
+    })
+}
+
 /// Nyalakan atau matikan mode izin penuh, dan simpan pilihannya.
 ///
-/// Urutannya sengaja: flag di memori dipasang **lebih dulu**, lalu disimpan.
-/// Itu penting untuk arah mematikan — arah yang menambah keamanan — yang harus
-/// berlaku seketika meskipun diska menolak ditulisi.
+/// # Perubahan di memori selalu berlaku, termasuk saat hasilnya `Err`
+///
+/// Ini menyimpang dari konvensi biasa dan pemanggil **wajib** tahu. `Err` di
+/// sini berarti "pilihannya berlaku sekarang tetapi gagal disimpan", bukan
+/// "tidak terjadi apa-apa". Frontend yang memperlakukannya seperti kegagalan
+/// biasa lalu mengembalikan posisi toggle akan menampilkan "mati" sementara
+/// persetujuan otomatis sungguhan **menyala** untuk sisa sesi — kebohongan UI
+/// tepat pada kendali yang paling tidak boleh berbohong.
+///
+/// Karena itu: setelah menerima `Err`, panggil [`get_full_permissions`] dan
+/// tampilkan apa pun yang ia kembalikan. Jangan mengasumsikan rollback — tidak
+/// ada rollback. Tampilkan juga pesan galatnya apa adanya; ia sudah dirangkai
+/// sesuai arah perubahan dan menyebut akibatnya pada peluncuran berikutnya.
+///
+/// Alasan urutan itu ada di [`apply_and_persist_full_permissions`].
 ///
 /// # Errors
 ///
@@ -366,25 +466,23 @@ pub fn set_full_permissions(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
-    state.ctx.set_full_permissions(enabled);
+    let dir = match app.path().app_config_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            // Tetap berlakukan pilihannya — alasannya sama persis dengan di
+            // `apply_and_persist_full_permissions`, dan di sini kita bahkan
+            // tidak bisa membaca apa yang tersimpan.
+            state.ctx.set_full_permissions(enabled);
+            return Err(persist_failure_message(
+                enabled,
+                None,
+                &format!("direktori pengaturan tidak bisa ditentukan: {error}"),
+            ));
+        }
+    };
 
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| format!("Direktori pengaturan tidak bisa ditentukan: {error}"))?;
-
-    settings::save(
-        &dir,
-        &settings::Settings {
-            full_permissions: enabled,
-        },
-    )
-    .map_err(|error| {
-        format!(
-            "Mode izin penuh berlaku sekarang, tetapi gagal disimpan ke {}: {error}. \
-             Pilihan ini tidak akan bertahan setelah aplikasi ditutup.",
-            dir.display()
-        )
+    apply_and_persist_full_permissions(&dir, enabled, |nilai| {
+        state.ctx.set_full_permissions(nilai);
     })
 }
 
@@ -658,6 +756,156 @@ mod tests {
 
         state.ctx.set_full_permissions(false);
         assert!(!state.ctx().full_permissions());
+    }
+
+    // ------------------------------------- urutan pasang-flag lalu simpan
+
+    static PEMBEDA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Direktori unik per pemanggil. Penghitung atomik, bukan jam: lihat
+    /// catatan pada helper serupa di `settings::tests`.
+    fn dir_sementara() -> PathBuf {
+        let urutan = PEMBEDA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "midscene-commands-{}-{}",
+            std::process::id(),
+            urutan
+        ));
+        std::fs::create_dir_all(&d).expect("direktori uji harus bisa dibuat");
+        d
+    }
+
+    /// Direktori yang tidak mungkin bisa ditulisi: `/dev/null` bukan direktori,
+    /// jadi `create_dir_all` di dalamnya gagal dengan `ENOTDIR`.
+    fn dir_mustahil() -> PathBuf {
+        PathBuf::from("/dev/null/mustahil/pengaturan")
+    }
+
+    fn perekam() -> (Arc<std::sync::atomic::AtomicBool>, impl Fn(bool)) {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tulis = {
+            let flag = Arc::clone(&flag);
+            move |nilai: bool| flag.store(nilai, std::sync::atomic::Ordering::SeqCst)
+        };
+        (flag, tulis)
+    }
+
+    /// **Urutan yang menjadi inti keputusan ini.** Menyimpan lebih dulu lalu
+    /// `?` akan membuat permintaan "matikan persetujuan otomatis" ditolak gara-
+    /// gara berkas pengaturan, dan agen terus menyetujui sendiri sepanjang
+    /// sesi. Tanpa test ini, refactor ke urutan itu tidak menggagalkan apa pun.
+    #[test]
+    fn simpan_gagal_tetap_memberlakukan_perubahan_di_memori() {
+        let (flag, tulis) = perekam();
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let hasil = apply_and_persist_full_permissions(&dir_mustahil(), false, tulis);
+
+        assert!(
+            hasil.is_err(),
+            "kegagalan menyimpan wajib muncul sebagai Err, bukan ditelan"
+        );
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::SeqCst),
+            "mematikan mode harus tetap berlaku di memori meski simpan gagal"
+        );
+    }
+
+    /// Arah sebaliknya, supaya urutannya terkunci di kedua arah.
+    #[test]
+    fn simpan_gagal_saat_menyalakan_juga_tetap_berlaku_dan_tetap_err() {
+        let (flag, tulis) = perekam();
+
+        let hasil = apply_and_persist_full_permissions(&dir_mustahil(), true, tulis);
+
+        assert!(hasil.is_err());
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Jalur suksesnya: flag berubah **dan** berkasnya benar-benar ditulis,
+    /// sehingga `settings::load` berikutnya membacanya kembali.
+    #[test]
+    fn simpan_sukses_mengubah_flag_dan_menulis_berkas() {
+        let dir = dir_sementara();
+        let (flag, tulis) = perekam();
+
+        apply_and_persist_full_permissions(&dir, true, tulis).expect("simpan harus berhasil");
+
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            settings::load(&dir).full_permissions,
+            "pilihan harus benar-benar sampai ke diska"
+        );
+    }
+
+    // ------------------------------------------ pesan gagal simpan per arah
+
+    /// Kalimat yang sama untuk kedua arah pernah dipakai di sini dan keliru ke
+    /// arah berbahaya. Yang menentukan bukan arah perubahannya sendiri
+    /// melainkan **apa yang akan terbaca nanti**, jadi itulah yang diuji.
+    #[test]
+    fn pesan_gagal_simpan_memperingatkan_hanya_saat_diska_masih_menyala() {
+        // Pengguna mematikan; diska masih `true` → mode menyala sendiri nanti.
+        let berbahaya = persist_failure_message(false, Some(true), "diska penuh");
+        // Pengguna menyalakan; diska masih `false` → nanti kembali mati.
+        let aman = persist_failure_message(true, Some(false), "diska penuh");
+
+        assert_ne!(
+            berbahaya, aman,
+            "kedua arah tidak boleh menghasilkan kalimat yang sama"
+        );
+        assert!(
+            berbahaya.contains("menyala sendiri"),
+            "arah mematikan wajib memperingatkan mode akan menyala sendiri: {berbahaya}"
+        );
+        assert!(
+            !aman.contains("menyala sendiri"),
+            "arah menyalakan tidak boleh memakai peringatan itu: {aman}"
+        );
+        assert!(
+            berbahaya.contains("sudah mati sekarang"),
+            "kalimat tidak boleh menyatakan kebalikan dari yang terjadi: {berbahaya}"
+        );
+        assert!(aman.contains("menyala sekarang"), "dapat: {aman}");
+
+        for pesan in [&berbahaya, &aman] {
+            assert!(
+                pesan.contains("diska penuh"),
+                "sebab teknisnya harus ikut terbawa: {pesan}"
+            );
+        }
+    }
+
+    /// Bila berkasnya kebetulan sudah berisi pilihan yang sama, tidak ada yang
+    /// akan menyimpang nanti — jadi kalimatnya tidak boleh menakut-nakuti.
+    #[test]
+    fn pesan_gagal_simpan_tidak_memperingatkan_bila_diska_sudah_sama() {
+        let pesan = persist_failure_message(false, Some(false), "diska penuh");
+        assert!(!pesan.contains("PERINGATAN"), "dapat: {pesan}");
+        assert!(pesan.contains("tetap sesuai"), "dapat: {pesan}");
+    }
+
+    /// Saat kita bahkan tidak bisa membaca apa yang tersimpan, arah mematikan
+    /// tetap harus berbunyi hati-hati — menebak ke sisi aman.
+    #[test]
+    fn pesan_gagal_simpan_berhati_hati_saat_diska_tak_terbaca() {
+        let mati = persist_failure_message(false, None, "direktori tak dikenal");
+        let nyala = persist_failure_message(true, None, "direktori tak dikenal");
+
+        assert!(mati.contains("PERINGATAN"), "dapat: {mati}");
+        assert!(!nyala.contains("PERINGATAN"), "dapat: {nyala}");
+    }
+
+    /// Kegagalan menyimpan yang sungguhan harus membawa kalimat arah yang
+    /// benar sampai ke pemanggil — bukan hanya `persist_failure_message` yang
+    /// benar bila dipanggil langsung.
+    #[test]
+    fn galat_dari_helper_memakai_kalimat_sesuai_arah() {
+        let (_flag, tulis) = perekam();
+        let galat = apply_and_persist_full_permissions(&dir_mustahil(), false, tulis)
+            .expect_err("harus gagal");
+
+        assert!(galat.contains("sudah mati sekarang"), "dapat: {galat}");
     }
 
     /// Tanpa sesi, `turn_target` menolak dengan kalimat yang bisa dibaca

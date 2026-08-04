@@ -49,10 +49,30 @@ pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Pembeda antar-test di dalam satu proses.
+    ///
+    /// **Jam bukan sumber keunikan yang sah di sini.** Versi pertama helper ini
+    /// membangun nama direktori dari pid + `SystemTime::now().as_nanos()` saja,
+    /// dan itu flaky: granularitas jam mesin ini jauh lebih kasar daripada satu
+    /// nanodetik — pada pengukuran, 188.877 dari 200.000 pembacaan
+    /// `as_nanos()` berturut-turut identik. Dua test yang mulai pada tick yang
+    /// sama di thread berbeda mendapat direktori yang **sama**, lalu
+    /// `settings.json.tmp` milik test satu menjatuhkan assertion
+    /// `!tmp_path.exists()` milik test lain.
+    ///
+    /// Penghitung atomik menyelesaikannya tanpa bergantung pada resolusi jam:
+    /// `fetch_add` menjamin setiap pemanggil dalam proses ini mendapat angka
+    /// yang berbeda, titik. pid dan nanodetik dipertahankan hanya sebagai
+    /// pembeda antar-*proses* (mis. dua `cargo test` yang jalan bersamaan, atau
+    /// sisa direktori dari run sebelumnya yang kebetulan memakai pid yang sama).
+    static PEMBEDA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn dir_sementara() -> std::path::PathBuf {
+        let urutan = PEMBEDA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!(
-            "midscene-settings-{}-{}",
+            "midscene-settings-{}-{}-{}",
             std::process::id(),
+            urutan,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

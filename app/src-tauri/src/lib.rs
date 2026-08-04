@@ -22,8 +22,16 @@ pub fn run() {
             let state = commands::AppState::new(app.handle().clone());
 
             // Pengaturan tersimpan harus sudah berlaku **sebelum** sesi pertama
-            // dibuat, kalau tidak permintaan izin pertama akan tetap membuka
-            // dialog meskipun pengguna sudah mematikannya sejak peluncuran lalu.
+            // dibuat. Yang dijaga di sini adalah pengguna yang **menyalakan**
+            // mode itu pada peluncuran lalu: memuatnya terlambat berarti
+            // permintaan izin pertama tetap ditanyakan padahal ia sudah memilih
+            // untuk tidak ditanya lagi.
+            //
+            // Arah kegagalannya memang jatuh ke sisi aman — yang terjadi cuma
+            // dialog yang seharusnya tidak muncul, bukan persetujuan yang
+            // seharusnya tidak diberikan — jadi ini soal menepati pilihan
+            // pengguna, bukan penjaga keamanan. Ditulis apa adanya supaya tidak
+            // ada yang mengira urutan ini menahan sesuatu yang berbahaya.
             //
             // Kegagalan menentukan direktori config sengaja tidak menjatuhkan
             // start: nilai bawaannya adalah "bertanya", yaitu sisi yang aman.
