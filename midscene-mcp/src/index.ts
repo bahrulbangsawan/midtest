@@ -2,16 +2,19 @@
 import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.ts';
-import { SessionManager } from './session.ts';
-import { FakeDevice } from './devices/fake.ts';
+import { SessionManager, DEFAULT_BUDGET } from './session.ts';
 import { ScenarioStore } from './scenarios.ts';
+import { createDevice } from './devices/factory.ts';
 
-// TODO(Task 9): swap FakeDevice for real web/computer device adapters.
-console.error(
-  '[midscene-mcp] WARNING: no real device adapters wired yet (Task 9 pending) — all automation is simulated.',
-);
 const root = process.env.MIDSCENE_MCP_ROOT ?? process.cwd();
-const sessions = new SessionManager(async (target) => new FakeDevice(target));
+const budgetDiminta = Number(process.env.MIDSCENE_MCP_BUDGET);
+const budget =
+  Number.isFinite(budgetDiminta) && budgetDiminta > 0 ? budgetDiminta : DEFAULT_BUDGET;
+
+const sessions = new SessionManager(
+  (target, opts) => createDevice(target, { ...opts, cacheId: `midscene-mcp-${target}` }),
+  budget,
+);
 const store = new ScenarioStore(join(root, 'scenarios'));
 const buildDemoPath = join(root, 'build-demo.js');
 

@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "@midscene/computer": "^1.10.8",
+    "@midscene/web": "^1.10.8",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "puppeteer": "^24.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

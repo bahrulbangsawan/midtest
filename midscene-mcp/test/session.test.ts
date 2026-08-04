@@ -6,12 +6,14 @@ import { ToolError } from '../src/errors.ts';
 
 function buatManager(limit = 3) {
   const dibuat: FakeDevice[] = [];
-  const manager = new SessionManager(async (target) => {
+  const optsDiterima: Array<{ url?: string }> = [];
+  const manager = new SessionManager(async (target, opts) => {
     const device = new FakeDevice(target);
     dibuat.push(device);
+    optsDiterima.push(opts);
     return device;
   }, limit);
-  return { manager, dibuat };
+  return { manager, dibuat, optsDiterima };
 }
 
 test('current melempar NO_SESSION sebelum sesi dimulai', () => {
@@ -24,6 +26,18 @@ test('start membuat device dan current mengembalikannya', async () => {
   await manager.start('web');
   assert.equal(manager.current(), dibuat[0]);
   assert.equal(dibuat[0].target, 'web');
+});
+
+test('start meneruskan opsi url ke pabrik device', async () => {
+  const { manager, optsDiterima } = buatManager();
+  await manager.start('web', { url: 'https://rekamedika.com' });
+  assert.deepEqual(optsDiterima, [{ url: 'https://rekamedika.com' }]);
+});
+
+test('start tanpa opsi tetap memanggil pabrik dengan objek opsi kosong', async () => {
+  const { manager, optsDiterima } = buatManager();
+  await manager.start('computer');
+  assert.deepEqual(optsDiterima, [{}]);
 });
 
 test('start kedua tanpa end melempar SESSION_ACTIVE', async () => {

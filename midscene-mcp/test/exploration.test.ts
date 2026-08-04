@@ -14,9 +14,11 @@ const BUILD_DEMO = join(import.meta.dirname, '..', '..', 'build-demo.js');
 
 async function hubungkan(limit = 40) {
   const dibuat: FakeDevice[] = [];
-  const sessions = new SessionManager(async (target) => {
+  const optsDiterima: Array<{ url?: string }> = [];
+  const sessions = new SessionManager(async (target, opts) => {
     const device = new FakeDevice(target);
     dibuat.push(device);
+    optsDiterima.push(opts);
     return device;
   }, limit);
 
@@ -25,7 +27,7 @@ async function hubungkan(limit = 40) {
   const client = new Client({ name: 'test', version: '0' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
-  return { client, dibuat, sessions };
+  return { client, dibuat, sessions, optsDiterima };
 }
 
 test('tools/list memuat keenam tool eksplorasi', async () => {
@@ -42,6 +44,32 @@ test('start_session membuat device sesuai target', async () => {
   await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
   assert.equal(dibuat.length, 1);
   assert.equal(dibuat[0].target, 'web');
+});
+
+test('start_session meneruskan url ke pabrik device untuk target web', async () => {
+  const { client, optsDiterima } = await hubungkan();
+  const hasil = await client.callTool({
+    name: 'start_session',
+    arguments: { target: 'web', url: 'https://rekamedika.com' },
+  });
+  assert.deepEqual(optsDiterima, [{ url: 'https://rekamedika.com' }]);
+  assert.match((hasil.content as any)[0].text, /at https:\/\/rekamedika\.com/);
+});
+
+test('start_session tanpa url meneruskan url undefined', async () => {
+  const { client, optsDiterima } = await hubungkan();
+  await client.callTool({ name: 'start_session', arguments: { target: 'web' } });
+  assert.deepEqual(optsDiterima, [{ url: undefined }]);
+});
+
+test('start_session target computer mengabaikan url dan mengatakannya', async () => {
+  const { client, optsDiterima } = await hubungkan();
+  const hasil = await client.callTool({
+    name: 'start_session',
+    arguments: { target: 'computer', url: 'https://rekamedika.com' },
+  });
+  assert.deepEqual(optsDiterima, [{ url: undefined }]);
+  assert.match((hasil.content as any)[0].text, /url was ignored/);
 });
 
 test('act meneruskan instruksi ke device', async () => {

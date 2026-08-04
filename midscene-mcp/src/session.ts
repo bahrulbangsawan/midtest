@@ -1,7 +1,12 @@
 import type { Device, DeviceTarget } from './devices/types.ts';
 import { ToolError } from './errors.ts';
 
-export type DeviceFactory = (target: DeviceTarget) => Promise<Device>;
+/** Per-session options an MCP caller may supply to `start_session`. */
+export interface StartOpts {
+  url?: string;
+}
+
+export type DeviceFactory = (target: DeviceTarget, opts: StartOpts) => Promise<Device>;
 
 export interface SessionStatus {
   target: DeviceTarget;
@@ -26,7 +31,7 @@ export class SessionManager {
     this.#limit = limit;
   }
 
-  async start(target: DeviceTarget): Promise<void> {
+  async start(target: DeviceTarget, opts: StartOpts = {}): Promise<void> {
     if (this.#device !== null) {
       throw new ToolError(
         'SESSION_ACTIVE',
@@ -34,7 +39,7 @@ export class SessionManager {
       );
     }
     this.#used = 0;
-    this.#device = await this.#buatDevice(target);
+    this.#device = await this.#buatDevice(target, opts);
   }
 
   current(): Device {

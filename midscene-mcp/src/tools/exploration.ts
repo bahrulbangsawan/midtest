@@ -19,15 +19,21 @@ export function registerExplorationTools(server: McpServer, sessions: SessionMan
         url: z.string().optional().describe('Initial URL, web target only'),
       },
     },
-    async ({ target }) => {
+    async ({ target, url }) => {
       try {
-        await sessions.start(target);
+        const urlDipakai = target === 'web' ? url : undefined;
+        await sessions.start(target, { url: urlDipakai });
         const { limit } = sessions.budgetStatus();
+        const dibuka = urlDipakai ? ` at ${urlDipakai}` : '';
+        const diabaikan =
+          url && urlDipakai === undefined
+            ? ' Note: url was ignored — it applies to the web target only.'
+            : '';
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Session started on ${target}. AI operation budget: ${limit}.`,
+              text: `Session started on ${target}${dibuka}. AI operation budget: ${limit}.${diabaikan}`,
             },
           ],
         };
