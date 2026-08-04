@@ -68,7 +68,7 @@ fn path_sidecar_benar_benar_ada() {
 async fn sesi_baru_membuat_id_sesi() {
     let spec = app_lib::agents::find_agent("claude").unwrap();
     let akar = akar_repo();
-    let (handle, _init) = app_lib::acp::connect(spec, &akar, ClientContext::diam()).await.unwrap();
+    let (handle, _init) = app_lib::acp::connect(spec, &akar, ClientContext::silent()).await.unwrap();
     let servers = vec![app_lib::sidecar::midscene_server(&akar)];
     let sid = app_lib::acp::new_session(&handle, &akar, servers)
         .await
@@ -100,7 +100,7 @@ async fn new_session_menyerah_bila_agen_tak_pernah_menjawab() {
     let akar = akar_repo();
     let anggaran = Duration::from_millis(400);
 
-    let (handle, _init) = app_lib::acp::connect(&bisu, &akar, ClientContext::diam())
+    let (handle, _init) = app_lib::acp::connect(&bisu, &akar, ClientContext::silent())
         .await
         .expect("fixture harus lulus handshake");
 

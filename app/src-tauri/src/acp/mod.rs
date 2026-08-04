@@ -15,10 +15,12 @@
 pub mod client;
 pub mod events;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use client::{
     ClientContext, DEFAULT_PERMISSION_TIMEOUT, EVENT_AGENT_DISCONNECTED, EVENT_AGUI,
-    EVENT_PERMISSION_REQUEST, EventSink, PermissionError, PermissionMap,
+    EVENT_PERMISSION_REQUEST, EventSink, NullSink, PermissionError, PermissionMap,
 };
 pub use events::to_agui;
 pub use session::{DEFAULT_SESSION_TIMEOUT, new_session, new_session_with_timeout};
@@ -180,6 +182,27 @@ impl fmt::Debug for AcpHandle {
 }
 
 impl AcpHandle {
+    /// Rakit handle dari bagian-bagiannya.
+    ///
+    /// Hanya untuk test: ia membuat [`AcpHandle`] di atas transport palsu
+    /// sehingga jalur yang menuntut `AcpHandle` sungguhan (mis. state aplikasi)
+    /// bisa diuji tanpa satu pun proses anak. Di produksi handle selalu lahir
+    /// dari [`connect_with_timeout`].
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        connection: ConnectionTo<Agent>,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        runner: JoinHandle<Result<(), agent_client_protocol::Error>>,
+        cwd: PathBuf,
+    ) -> Self {
+        Self {
+            connection,
+            shutdown_tx,
+            runner,
+            cwd,
+        }
+    }
+
     /// Koneksi ke agen, untuk mengirim request lanjutan (`session/new`, dll).
     #[must_use]
     pub fn connection(&self) -> &ConnectionTo<Agent> {
@@ -237,6 +260,33 @@ fn resolve_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
     })
 }
 
+/// Kapabilitas yang kita iklankan ke agen pada `initialize`.
+///
+/// # Kopling yang menahan seluruh desain handler
+///
+/// [`client::builder`] hanya mendaftarkan **satu** handler request:
+/// `session/request_permission`. Itu aman semata-mata karena nilai yang
+/// dikembalikan fungsi ini mengiklankan `fs.readTextFile = false`,
+/// `fs.writeTextFile = false`, dan `terminal = false`, sehingga agen yang patuh
+/// tidak akan pernah mengirim `fs/*` atau `terminal/*`.
+///
+/// Kopling itu rapuh ke satu arah dan **senyap** bila dilanggar: setiap request
+/// agen→klien membawa `sessionId`, dan request ber-`sessionId` yang tidak punya
+/// handler tidak dibalas `method not found` melainkan masuk antrean retry
+/// selamanya (lihat tabel di dokumentasi [`client`]). Jadi menyalakan satu
+/// kapabilitas di sini tanpa menambah handler-nya akan **membekukan setiap
+/// sesi** yang menyentuh berkas atau terminal — persis kelas kegagalan yang
+/// Task 6 ada untuk dihapus, dan tanpa satu pun pesan galat.
+///
+/// [`kapabilitas_dan_handler_harus_berubah_bersama`] menjaga kopling ini: ia
+/// gagal begitu ada kapabilitas yang dinyalakan, dan pesan gagalnya menyebut
+/// handler apa yang harus ikut didaftarkan.
+///
+/// [`kapabilitas_dan_handler_harus_berubah_bersama`]: self::tests::kapabilitas_dan_handler_harus_berubah_bersama
+fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities::default()
+}
+
 /// Jalankan biner adapter milik `spec` dan selesaikan handshake `initialize`,
 /// dengan batas waktu handshake bawaan [`DEFAULT_HANDSHAKE_TIMEOUT`].
 ///
@@ -286,7 +336,7 @@ pub async fn connect_with_timeout(
         client::builder(ctx)
             .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
                 let request = InitializeRequest::new(ProtocolVersion::V1)
-                    .client_capabilities(ClientCapabilities::default())
+                    .client_capabilities(client_capabilities())
                     .client_info(Implementation::new(
                         client::CLIENT_NAME,
                         env!("CARGO_PKG_VERSION"),
@@ -436,6 +486,36 @@ mod tests {
         assert!(handshake.contains("initialize"), "dapat: {handshake}");
         assert!(sesi.contains("session/new"), "dapat: {sesi}");
         assert_ne!(handshake, sesi);
+    }
+
+    /// Menjaga kopling antara kapabilitas yang diiklankan dan handler yang
+    /// terdaftar (lihat [`client_capabilities`]).
+    ///
+    /// Kita hanya menangani `session/request_permission`. Menyalakan `fs` atau
+    /// `terminal` tanpa menambah handler-nya tidak menghasilkan galat apa pun —
+    /// setiap request agen→klien membawa `sessionId`, dan request ber-`sessionId`
+    /// tanpa handler masuk antrean retry selamanya, bukan dibalas
+    /// `method not found`. Sesi akan membeku diam-diam pada operasi berkas
+    /// pertama. Karena itu perubahannya harus gagal di sini lebih dulu.
+    #[test]
+    fn kapabilitas_dan_handler_harus_berubah_bersama() {
+        let json = serde_json::to_value(client_capabilities()).expect("harus terserialisasi");
+
+        assert_eq!(
+            json["fs"]["readTextFile"], false,
+            "fs.readTextFile dinyalakan: daftarkan handler `fs/read_text_file` \
+             di client::builder, atau sesi akan membeku pada pembacaan berkas pertama"
+        );
+        assert_eq!(
+            json["fs"]["writeTextFile"], false,
+            "fs.writeTextFile dinyalakan: daftarkan handler `fs/write_text_file` \
+             di client::builder, atau sesi akan membeku pada penulisan berkas pertama"
+        );
+        assert_eq!(
+            json["terminal"], false,
+            "terminal dinyalakan: daftarkan handler `terminal/*` di client::builder, \
+             atau sesi akan membeku pada perintah terminal pertama"
+        );
     }
 
     #[test]

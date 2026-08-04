@@ -47,21 +47,39 @@
 //! `to_future_hack` diisi makro `on_receive_notification!()`
 //! (`src/lib.rs:197`), bukan `on_receive_request!()`.
 //!
-//! # Koreksi atas catatan Task 3: handler yang salah pasang **menggantung**
+//! # Koreksi atas catatan Task 3: request ber-`sessionId` tanpa handler **menggantung**
 //!
 //! Catatan lama modul ini menyatakan permintaan tanpa handler dibalas otomatis
-//! dengan `method not found`, jadi "agen tidak menggantung". Itu hanya benar
-//! untuk method yang crate sendiri tidak kenal. Method peran klien yang dikenal
-//! tetapi tanpa handler justru masuk antrean retry
-//! (`incoming_actor.rs:617`) menunggu handler dinamis yang tidak akan pernah
-//! didaftarkan — tidak ada balasan sama sekali. Keduanya dikunci oleh test
-//! `permintaan_tanpa_handler_dibalas_method_not_found` dan
-//! `permintaan_klien_yang_tak_didaftarkan_menggantung_bukan_ditolak`.
+//! dengan `method not found`, jadi "agen tidak menggantung". Itu salah, dan
+//! pembeda sebenarnya bukan soal method dikenal atau tidak.
+//!
+//! Pembedanya adalah **ada tidaknya field `sessionId` di dalam `params`**.
+//! `Agent::default_handle_dispatch_from` (`src/role/acp.rs:294-313`) melakukan
+//! `let retry = message.has_session_id();`, dan `has_session_id` hanyalah
+//! `has_field("sessionId")` (`src/jsonrpc.rs:4393-4396`) — pemeriksaan field
+//! JSON mentah, bukan pengenalan method. Konsekuensinya:
+//!
+//! | Pesan | Akibat bila tak ada handler |
+//! |---|---|
+//! | method apa pun **dengan** `sessionId` | masuk antrean retry (`incoming_actor.rs:617`) menunggu handler dinamis yang tidak akan pernah ada — **tidak ada balasan** |
+//! | method apa pun **tanpa** `sessionId` | dibalas `-32601 Method not found` (`incoming_actor.rs:631`) |
+//!
+//! Jadi **setiap** request agen→klien yang berlingkup sesi — `session/*`,
+//! `fs/*`, `terminal/*`, termasuk method kustom — menggantung diam-diam bila
+//! handler-nya tidak terdaftar. `session/request_permission` selalu membawa
+//! `sessionId`, jadi ia jatuh tepat di baris pertama tabel itu.
 //!
 //! Itulah sebabnya pendaftaran gerbang izin diuji lewat kawat JSON-RPC
 //! sungguhan, bukan dengan memanggil [`refuse`] langsung: salah pasang tipe
 //! request tidak menghasilkan galat yang berisik, melainkan sesi yang membeku
-//! diam-diam.
+//! tanpa satu pun pesan. Ketiga baris tabel dikunci oleh test
+//! `permintaan_ber_session_id_tanpa_handler_menggantung`,
+//! `permintaan_tanpa_session_id_dibalas_method_not_found`, dan
+//! `method_dikenal_tanpa_session_id_tetap_dibalas_method_not_found`.
+//!
+//! Kaitannya dengan kapabilitas yang kita iklankan dicatat di
+//! [`super::client_capabilities`]: kita aman menangani `session/request_permission`
+//! saja **hanya karena** `fs` dan `terminal` diiklankan mati.
 //!
 //! # Gerbang izin menunggu di luar dispatch loop
 //!
@@ -135,9 +153,9 @@ pub trait EventSink: Send + Sync + 'static {
 /// berarti menghidupkan kembali persis cacat yang ditutup Task 6 — setiap
 /// `session/update` diterjemahkan dengan benar lalu dibuang tanpa jejak.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SinkDiam;
+pub struct NullSink;
 
-impl EventSink for SinkDiam {
+impl EventSink for NullSink {
     fn emit(&self, _event: &str, _payload: Value) {}
 }
 
@@ -146,19 +164,19 @@ impl EventSink for SinkDiam {
 pub enum PermissionError {
     /// Tidak ada permintaan dengan id itu: sudah dijawab, sudah kedaluwarsa,
     /// atau memang tidak pernah ada.
-    TidakDikenal(String),
+    Unknown(String),
     /// Entrinya ada tetapi penunggunya sudah pergi.
-    PenungguHilang(String),
+    WaiterGone(String),
 }
 
 impl fmt::Display for PermissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TidakDikenal(id) => write!(
+            Self::Unknown(id) => write!(
                 f,
                 "permintaan izin {id} tidak dikenal; mungkin sudah dijawab atau kedaluwarsa"
             ),
-            Self::PenungguHilang(id) => {
+            Self::WaiterGone(id) => {
                 write!(f, "permintaan izin {id} sudah tidak ditunggu siapa pun")
             }
         }
@@ -182,13 +200,13 @@ pub struct PermissionMap {
 impl fmt::Debug for PermissionMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PermissionMap")
-            .field("menunggu", &self.jumlah_penunggu())
+            .field("menunggu", &self.pending_count())
             .finish()
     }
 }
 
 impl PermissionMap {
-    fn kunci(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<String>>> {
+    fn waiters(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<String>>> {
         // Peta ini hanya disentuh oleh operasi infalibel (insert/remove), jadi
         // satu-satunya cara racun masuk adalah panik di kode lain sambil
         // memegang kunci. Memulihkan isinya lebih baik daripada menjatuhkan
@@ -200,7 +218,7 @@ impl PermissionMap {
     #[must_use]
     pub fn daftar(&self, request_id: String) -> oneshot::Receiver<String> {
         let (tx, rx) = oneshot::channel();
-        self.kunci().insert(request_id, tx);
+        self.waiters().insert(request_id, tx);
         rx
     }
 
@@ -208,31 +226,31 @@ impl PermissionMap {
     ///
     /// # Errors
     ///
-    /// [`PermissionError::TidakDikenal`] bila tidak ada entri dengan id itu —
+    /// [`PermissionError::Unknown`] bila tidak ada entri dengan id itu —
     /// sengaja galat, bukan diam-diam tidak melakukan apa-apa, supaya frontend
     /// yang menjawab dialog basi tahu jawabannya tidak sampai ke mana pun.
-    /// [`PermissionError::PenungguHilang`] bila entrinya ada tetapi
+    /// [`PermissionError::WaiterGone`] bila entrinya ada tetapi
     /// penunggunya sudah dibuang.
     pub fn jawab(&self, request_id: &str, option_id: &str) -> Result<(), PermissionError> {
         let tx = self
-            .kunci()
+            .waiters()
             .remove(request_id)
-            .ok_or_else(|| PermissionError::TidakDikenal(request_id.to_owned()))?;
+            .ok_or_else(|| PermissionError::Unknown(request_id.to_owned()))?;
 
         tx.send(option_id.to_owned())
-            .map_err(|_| PermissionError::PenungguHilang(request_id.to_owned()))
+            .map_err(|_| PermissionError::WaiterGone(request_id.to_owned()))
     }
 
     /// Buang satu entri tanpa menjawabnya. Dipakai jalur batas waktu dan
     /// pembatalan, yang menjawab agen sendiri.
-    pub fn buang(&self, request_id: &str) {
-        self.kunci().remove(request_id);
+    pub fn discard(&self, request_id: &str) {
+        self.waiters().remove(request_id);
     }
 
     /// Berapa permintaan yang masih menunggu jawaban.
     #[must_use]
-    pub fn jumlah_penunggu(&self) -> usize {
-        self.kunci().len()
+    pub fn pending_count(&self) -> usize {
+        self.waiters().len()
     }
 }
 
@@ -248,9 +266,9 @@ struct Inner {
     permissions: PermissionMap,
     ids: Mutex<RunIds>,
     permission_timeout: Duration,
-    izin_berikutnya: AtomicU64,
-    run_berikutnya: AtomicU64,
-    sedang_menutup: AtomicBool,
+    next_permission: AtomicU64,
+    next_run: AtomicU64,
+    notify_on_close: AtomicBool,
 }
 
 /// State yang dibagi antara perintah Tauri dan handler-handler peran klien.
@@ -293,19 +311,21 @@ impl ClientContext {
                 permissions: PermissionMap::default(),
                 ids: Mutex::new(RunIds::default()),
                 permission_timeout,
-                izin_berikutnya: AtomicU64::new(1),
-                run_berikutnya: AtomicU64::new(1),
-                sedang_menutup: AtomicBool::new(false),
+                next_permission: AtomicU64::new(1),
+                next_run: AtomicU64::new(1),
+                // Mulai dari "jangan beri tahu": sebelum satu sesi benar-benar
+                // berdiri, tidak ada koneksi yang layak dilaporkan putus.
+                notify_on_close: AtomicBool::new(false),
             }),
         }
     }
 
     /// Konteks yang membuang setiap event, untuk pemakaian tanpa webview.
     ///
-    /// Lihat peringatan di [`SinkDiam`].
+    /// Lihat peringatan di [`NullSink`].
     #[must_use]
-    pub fn diam() -> Self {
-        Self::new(Arc::new(SinkDiam))
+    pub fn silent() -> Self {
+        Self::new(Arc::new(NullSink))
     }
 
     /// Peta permintaan izin yang sedang menunggu.
@@ -341,32 +361,32 @@ impl ClientContext {
     /// mengirim `session/update` sebelum prompt pertama atau setelah satu
     /// giliran selesai, dan event AG-UI tanpa `runId` tidak berarti apa-apa bagi
     /// frontend. Menempelkannya ke run terakhir lebih jujur daripada membuangnya.
-    pub fn pasang_thread(&self, thread_id: String) {
-        let run_id = self.run_id_baru();
+    pub fn begin_thread(&self, thread_id: String) {
+        let run_id = self.new_run_id();
         let mut ids = self.inner.ids.lock().unwrap_or_else(PoisonError::into_inner);
         ids.thread_id = thread_id;
         ids.run_id = run_id;
     }
 
     /// Mulai satu giliran baru dan kembalikan `(runId, threadId)`-nya.
-    pub fn mulai_run(&self) -> (String, String) {
-        let run_id = self.run_id_baru();
+    pub fn begin_run(&self) -> (String, String) {
+        let run_id = self.new_run_id();
         let mut ids = self.inner.ids.lock().unwrap_or_else(PoisonError::into_inner);
         ids.run_id.clone_from(&run_id);
         (run_id, ids.thread_id.clone())
     }
 
-    fn run_id_baru(&self) -> String {
+    fn new_run_id(&self) -> String {
         format!(
             "run-{}",
-            self.inner.run_berikutnya.fetch_add(1, Ordering::Relaxed)
+            self.inner.next_run.fetch_add(1, Ordering::Relaxed)
         )
     }
 
-    fn izin_id_baru(&self) -> String {
+    fn new_permission_id(&self) -> String {
         format!(
             "izin-{}",
-            self.inner.izin_berikutnya.fetch_add(1, Ordering::Relaxed)
+            self.inner.next_permission.fetch_add(1, Ordering::Relaxed)
         )
     }
 
@@ -375,21 +395,30 @@ impl ClientContext {
         self.inner.sink.emit(event, payload);
     }
 
-    /// Tandai bahwa penutupan koneksi berikutnya kita minta sendiri, supaya
-    /// [`EVENT_AGENT_DISCONNECTED`] tidak dikirim untuk itu.
-    pub fn tandai_menutup(&self) {
-        self.inner.sedang_menutup.store(true, Ordering::SeqCst);
+    /// Mulai laporkan putusnya koneksi ke webview.
+    ///
+    /// Sengaja **opt-in dan dipasang paling akhir**, setelah sesi benar-benar
+    /// berdiri. Sebelum titik itu setiap penutupan sudah punya pelapornya
+    /// sendiri — `connect_agent` mengembalikan galat — jadi mengemisikan
+    /// `agent-disconnected` juga berarti webview menerima dua kabar untuk satu
+    /// kejadian. Bawaan yang mati juga membuat jalur-jalur gagal-handshake
+    /// konsisten satu sama lain: yang EOF di tengah handshake dan yang kena
+    /// batas waktu (di mana `runner.abort()` tidak menjalankan `on_close` sama
+    /// sekali) sekarang sama-sama diam.
+    pub fn arm_disconnect_notice(&self) {
+        self.inner.notify_on_close.store(true, Ordering::SeqCst);
     }
 
-    /// Kebalikan [`Self::tandai_menutup`], dipanggil setelah koneksi baru siap.
-    pub fn batalkan_penutupan(&self) {
-        self.inner.sedang_menutup.store(false, Ordering::SeqCst);
+    /// Berhenti melaporkan putusnya koneksi — dipasang sebelum penutupan yang
+    /// kita minta sendiri, yang bukan kabar buruk.
+    pub fn disarm_disconnect_notice(&self) {
+        self.inner.notify_on_close.store(false, Ordering::SeqCst);
     }
 
-    /// Apakah penutupan yang sedang terjadi kita minta sendiri.
+    /// Apakah penutupan berikutnya akan dilaporkan ke webview.
     #[must_use]
-    pub fn sedang_menutup(&self) -> bool {
-        self.inner.sedang_menutup.load(Ordering::SeqCst)
+    pub fn notifies_on_close(&self) -> bool {
+        self.inner.notify_on_close.load(Ordering::SeqCst)
     }
 
     /// Terjemahkan satu `session/update` dan emisikan hasilnya ke webview.
@@ -397,7 +426,7 @@ impl ClientContext {
     /// Ini satu-satunya jalur yang membuat teks asisten dan progres tool call
     /// sampai ke layar. Sengaja sinkron dan tanpa I/O supaya aman dipanggil dari
     /// dalam dispatch loop.
-    pub fn teruskan_pembaruan(&self, update: &SessionUpdate) {
+    pub fn forward_update(&self, update: &SessionUpdate) {
         let (run_id, thread_id) = self.run_ids();
         for event in to_agui(update, &run_id, &thread_id) {
             self.emit(EVENT_AGUI, event);
@@ -406,10 +435,10 @@ impl ClientContext {
 }
 
 /// Apa yang mengakhiri penantian satu permintaan izin.
-enum Keputusan {
-    Dipilih(String),
-    Ditolak,
-    Dibatalkan,
+enum Decision {
+    Selected(String),
+    Refused,
+    Cancelled,
 }
 
 /// Bangun builder koneksi untuk peran klien, lengkap dengan handler-handlernya.
@@ -420,8 +449,8 @@ enum Keputusan {
 ///   hilang tanpa jejak bila handler ini tidak ada).
 /// * `session/request_permission` → event `permission-request`, lalu menunggu
 ///   `answer_permission` di luar dispatch loop.
-/// * penutupan transport → event `agent-disconnected`, kecuali penutupannya
-///   memang kita minta sendiri.
+/// * penutupan transport → event `agent-disconnected`, tetapi hanya bila
+///   [`ClientContext::arm_disconnect_notice`] sudah dipasang.
 pub fn builder(
     ctx: ClientContext,
 ) -> Builder<
@@ -430,29 +459,29 @@ pub fn builder(
     NullRun,
     impl HandleConnectionClose<Agent>,
 > {
-    let ctx_notifikasi = ctx.clone();
-    let ctx_izin = ctx.clone();
-    let ctx_tutup = ctx;
+    let notification_ctx = ctx.clone();
+    let permission_ctx = ctx.clone();
+    let close_ctx = ctx;
 
     Client
         .builder()
         .name(CLIENT_NAME)
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                ctx_notifikasi.teruskan_pembaruan(&notification.update);
+                notification_ctx.forward_update(&notification.update);
                 Ok(())
             },
             on_receive_notification!(),
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, cx: ConnectionTo<Agent>| {
-                gerbang_izin(&ctx_izin, request, responder, &cx)
+                permission_gate(&permission_ctx, request, responder, &cx)
             },
             on_receive_request!(),
         )
         .on_close(async move |_cx| {
-            if !ctx_tutup.sedang_menutup() {
-                ctx_tutup.emit(
+            if close_ctx.notifies_on_close() {
+                close_ctx.emit(
                     EVENT_AGENT_DISCONNECTED,
                     json!({ "reason": "transport agen tertutup" }),
                 );
@@ -466,7 +495,7 @@ pub fn builder(
 /// Mengembalikan [`Handled::Yes`] segera: jawabannya dikirim belakangan dari
 /// task yang dijalankan [`ConnectionTo::spawn`], sehingga dispatch loop bebas
 /// menerima `$/cancel_request` untuk permintaan ini.
-fn gerbang_izin(
+fn permission_gate(
     ctx: &ClientContext,
     request: RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
@@ -475,7 +504,7 @@ fn gerbang_izin(
     Handled<(RequestPermissionRequest, Responder<RequestPermissionResponse>)>,
     agent_client_protocol::Error,
 > {
-    let request_id = ctx.izin_id_baru();
+    let request_id = ctx.new_permission_id();
     let rx = ctx.permissions().daftar(request_id.clone());
 
     ctx.emit(
@@ -496,24 +525,24 @@ fn gerbang_izin(
     let hasil_spawn = cx.spawn(async move {
         let keputusan = tokio::select! {
             biased;
-            () = cancellation.cancelled() => Keputusan::Dibatalkan,
+            () = cancellation.cancelled() => Decision::Cancelled,
             hasil = tokio::time::timeout(batas, rx) => match hasil {
-                Ok(Ok(option_id)) => Keputusan::Dipilih(option_id),
+                Ok(Ok(option_id)) => Decision::Selected(option_id),
                 // Penunggunya dibuang, atau batas waktu lewat tanpa jawaban.
                 // Keduanya berarti tidak ada persetujuan manusia, dan tidak ada
                 // persetujuan berarti tolak.
-                Ok(Err(_)) | Err(_) => Keputusan::Ditolak,
+                Ok(Err(_)) | Err(_) => Decision::Refused,
             },
         };
 
         // Wajib, di semua jalur: entri yang tertinggal membuat id mati tampak
         // hidup bagi `answer_permission`.
-        permissions.buang(&id_task);
+        permissions.discard(&id_task);
 
         match keputusan {
-            Keputusan::Dipilih(option_id) => responder.respond(pilih(&request, &option_id)),
-            Keputusan::Ditolak => responder.respond(refuse(&request)),
-            Keputusan::Dibatalkan => {
+            Decision::Selected(option_id) => responder.respond(select_option(&request, &option_id)),
+            Decision::Refused => responder.respond(refuse(&request)),
+            Decision::Cancelled => {
                 responder.respond_with_error(agent_client_protocol::Error::request_cancelled())
             }
         }
@@ -523,7 +552,7 @@ fn gerbang_izin(
         // Task-nya tidak jadi jalan, jadi `responder` dan `rx` sudah ikut
         // ter-drop bersama closure-nya. Yang masih bisa (dan wajib) dibersihkan
         // adalah entri petanya.
-        ctx.permissions().buang(&request_id);
+        ctx.permissions().discard(&request_id);
         return Err(error);
     }
 
@@ -535,7 +564,7 @@ fn gerbang_izin(
 /// `option_id` diverifikasi terhadap daftar yang benar-benar ditawarkan agen.
 /// Frontend yang salah kirim tidak boleh berubah menjadi persetujuan atas opsi
 /// yang tidak pernah ada; kegagalan yang aman di sini adalah menolak.
-fn pilih(request: &RequestPermissionRequest, option_id: &str) -> RequestPermissionResponse {
+fn select_option(request: &RequestPermissionRequest, option_id: &str) -> RequestPermissionResponse {
     match request
         .options
         .iter()
@@ -576,14 +605,10 @@ fn refuse(request: &RequestPermissionRequest) -> RequestPermissionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::Lines;
+    use crate::acp::testing::{FakeAgent, recording_context};
     use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
-    use futures::channel::mpsc as futures_mpsc;
-    use futures::{SinkExt, StreamExt};
-    use tokio::sync::mpsc;
-    use tokio::task::JoinHandle;
 
     fn permintaan(options: Vec<PermissionOption>) -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -598,6 +623,18 @@ mod tests {
             PermissionOption::new("ya", "Izinkan", PermissionOptionKind::AllowOnce),
             PermissionOption::new("tidak", "Tolak", PermissionOptionKind::RejectOnce),
         ]
+    }
+
+    fn params_izin() -> Value {
+        serde_json::to_value(permintaan(opsi_lengkap())).expect("harus terserialisasi")
+    }
+
+    fn potongan_teks(teks: &str) -> Value {
+        let notifikasi = SessionNotification::new(
+            "sesi-uji",
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(teks))),
+        );
+        serde_json::to_value(&notifikasi).expect("harus terserialisasi")
     }
 
     // ---------------------------------------------------------------- refuse
@@ -663,11 +700,11 @@ mod tests {
         ));
     }
 
-    // ----------------------------------------------------------------- pilih
+    // ---------------------------------------------------------- select_option
 
     #[test]
-    fn pilih_meneruskan_opsi_yang_ditawarkan() {
-        match pilih(&permintaan(opsi_lengkap()), "ya").outcome {
+    fn memilih_opsi_yang_ditawarkan() {
+        match select_option(&permintaan(opsi_lengkap()), "ya").outcome {
             RequestPermissionOutcome::Selected(selected) => {
                 assert_eq!(selected.option_id.0.as_ref(), "ya");
             }
@@ -678,8 +715,8 @@ mod tests {
     /// Opsi yang tidak pernah ditawarkan agen tidak boleh berubah menjadi
     /// persetujuan; kegagalan yang aman adalah menolak.
     #[test]
-    fn pilih_menolak_opsi_yang_tidak_ditawarkan() {
-        match pilih(&permintaan(opsi_lengkap()), "opsi-karangan").outcome {
+    fn menolak_opsi_yang_tidak_ditawarkan() {
+        match select_option(&permintaan(opsi_lengkap()), "opsi-karangan").outcome {
             RequestPermissionOutcome::Selected(selected) => {
                 assert_eq!(selected.option_id.0.as_ref(), "tidak");
             }
@@ -702,7 +739,7 @@ mod tests {
         let peta = PermissionMap::default();
         assert_eq!(
             peta.jawab("hantu", "allow"),
-            Err(PermissionError::TidakDikenal("hantu".into()))
+            Err(PermissionError::Unknown("hantu".into()))
         );
     }
 
@@ -715,7 +752,7 @@ mod tests {
             peta.jawab("req-2", "allow").is_err(),
             "entri harus sudah dibuang"
         );
-        assert_eq!(peta.jumlah_penunggu(), 0);
+        assert_eq!(peta.pending_count(), 0);
     }
 
     #[tokio::test]
@@ -724,37 +761,19 @@ mod tests {
         drop(peta.daftar("req-3".into()));
         assert_eq!(
             peta.jawab("req-3", "allow"),
-            Err(PermissionError::PenungguHilang("req-3".into()))
+            Err(PermissionError::WaiterGone("req-3".into()))
         );
-        assert_eq!(peta.jumlah_penunggu(), 0, "entri harus tetap dibuang");
+        assert_eq!(peta.pending_count(), 0, "entri harus tetap dibuang");
     }
 
     // -------------------------------------------------------- ClientContext
 
-    /// Sink berbasis channel: menggantikan `AppHandle` di test.
-    struct SinkUji {
-        tx: mpsc::UnboundedSender<(String, Value)>,
-    }
-
-    impl EventSink for SinkUji {
-        fn emit(&self, event: &str, payload: Value) {
-            drop(self.tx.send((event.to_owned(), payload)));
-        }
-    }
-
-    fn konteks(batas: Duration) -> (ClientContext, mpsc::UnboundedReceiver<(String, Value)>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let ctx = ClientContext::with_permission_timeout(Arc::new(SinkUji { tx }), batas);
-        ctx.pasang_thread("thread-uji".into());
-        (ctx, rx)
-    }
-
     #[tokio::test]
     async fn pembaruan_sesi_diterjemahkan_dan_diemisikan() {
-        let (ctx, mut events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
+        let (ctx, mut events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
         let (run_id, thread_id) = ctx.run_ids();
 
-        ctx.teruskan_pembaruan(&SessionUpdate::AgentMessageChunk(ContentChunk::new(
+        ctx.forward_update(&SessionUpdate::AgentMessageChunk(ContentChunk::new(
             ContentBlock::from("halo"),
         )));
 
@@ -767,10 +786,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mulai_run_mengganti_run_id_tetapi_menahan_thread_id() {
-        let (ctx, _events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
+    async fn begin_run_mengganti_run_id_tetapi_menahan_thread_id() {
+        let (ctx, _events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
         let (run_pertama, thread_pertama) = ctx.run_ids();
-        let (run_kedua, thread_kedua) = ctx.mulai_run();
+        let (run_kedua, thread_kedua) = ctx.begin_run();
 
         assert_ne!(run_pertama, run_kedua);
         assert_eq!(thread_pertama, thread_kedua);
@@ -779,130 +798,26 @@ mod tests {
 
     // ------------------------------------------------- dispatch sungguhan
 
-    /// Satu agen palsu di ujung kawat.
-    ///
-    /// Sengaja bicara **JSON-RPC mentah**, bukan lewat helper crate: itulah satu-
-    /// satunya cara membuktikan handler kita benar-benar terpasang pada nama
-    /// method yang benar. Bila `on_receive_request` dipasang pada tipe request
-    /// yang salah, crate akan menjawab `method_not_found` dan test yang hanya
-    /// memanggil `refuse`/`pilih` langsung tetap lulus — persis lubang yang
-    /// ditutup di sini.
-    struct AgenPalsu {
-        ke_klien: Option<futures_mpsc::UnboundedSender<std::io::Result<String>>>,
-        dari_klien: futures_mpsc::UnboundedReceiver<String>,
-        events: mpsc::UnboundedReceiver<(String, Value)>,
-        koneksi: Option<JoinHandle<Result<(), agent_client_protocol::Error>>>,
-    }
-
-    impl AgenPalsu {
-        fn baru(ctx: &ClientContext, events: mpsc::UnboundedReceiver<(String, Value)>) -> Self {
-            let (ke_klien, masuk) = futures_mpsc::unbounded::<std::io::Result<String>>();
-            let (keluar, dari_klien) = futures_mpsc::unbounded::<String>();
-            let transport = Lines::new(keluar.sink_map_err(std::io::Error::other), masuk);
-            let koneksi = tokio::spawn(builder(ctx.clone()).connect_to(transport));
-
-            Self {
-                ke_klien: Some(ke_klien),
-                dari_klien,
-                events,
-                koneksi: Some(koneksi),
-            }
-        }
-
-        fn kirim(&self, pesan: Value) {
-            self.ke_klien
-                .as_ref()
-                .expect("kanal ke klien harus masih ada")
-                .unbounded_send(Ok(pesan.to_string()))
-                .expect("kanal ke klien harus terbuka");
-        }
-
-        fn kirim_notifikasi(&self, method: &str, params: Value) {
-            self.kirim(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
-        }
-
-        fn kirim_permintaan(&self, id: u64, method: &str, params: Value) {
-            self.kirim(
-                json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-            );
-        }
-
-        async fn balasan(&mut self) -> Value {
-            let baris = tokio::time::timeout(Duration::from_secs(5), self.dari_klien.next())
-                .await
-                .expect("klien harus membalas sebelum batas waktu test")
-                .expect("kanal dari klien tidak boleh tertutup");
-            serde_json::from_str(&baris).expect("balasan harus JSON")
-        }
-
-        /// Balasan yang datang dalam `batas`, atau `None` bila tidak ada.
-        async fn balasan_dalam(&mut self, batas: Duration) -> Option<Value> {
-            let baris = tokio::time::timeout(batas, self.dari_klien.next())
-                .await
-                .ok()?
-                .expect("kanal dari klien tidak boleh tertutup");
-            Some(serde_json::from_str(&baris).expect("balasan harus JSON"))
-        }
-
-        async fn event(&mut self) -> (String, Value) {
-            tokio::time::timeout(Duration::from_secs(5), self.events.recv())
-                .await
-                .expect("event harus datang sebelum batas waktu test")
-                .expect("kanal event tidak boleh tertutup")
-        }
-
-        /// Tutup arah agen → klien, yaitu EOF bersih di sisi transport masuk.
-        fn putuskan(&mut self) {
-            drop(self.ke_klien.take());
-        }
-
-        /// Tunggu future koneksi selesai. Aman dipanggil berkali-kali.
-        async fn tunggu_selesai(&mut self) {
-            let Some(koneksi) = self.koneksi.take() else {
-                return;
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(5), koneksi).await;
-        }
-
-        async fn tutup(mut self) {
-            self.putuskan();
-            self.tunggu_selesai().await;
-        }
-    }
-
-    fn params_izin() -> Value {
-        serde_json::to_value(permintaan(opsi_lengkap())).expect("harus terserialisasi")
-    }
-
     /// **Gerbang utama Task 6.** Membuktikan `session/update` yang datang
     /// sebagai notifikasi JSON-RPC sungguhan berakhir sebagai event `agui` di
     /// webview. Sebelum task ini, notifikasi itu jatuh ke
     /// `incoming_actor.rs:627` dan hilang tanpa jejak.
     #[tokio::test]
     async fn notifikasi_session_update_sampai_ke_webview() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
         let (run_id, thread_id) = ctx.run_ids();
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
-        let notifikasi = SessionNotification::new(
-            "sesi-uji",
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
-                "teks dari agen",
-            ))),
-        );
-        agen.kirim_notifikasi(
-            "session/update",
-            serde_json::to_value(&notifikasi).expect("harus terserialisasi"),
-        );
+        agen.send_notification("session/update", potongan_teks("teks dari agen"));
 
-        let (nama, payload) = agen.event().await;
+        let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGUI);
         assert_eq!(payload["type"], "TEXT_MESSAGE_CHUNK");
         assert_eq!(payload["delta"], "teks dari agen");
         assert_eq!(payload["runId"], run_id);
         assert_eq!(payload["threadId"], thread_id);
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
     /// Satu `session/update` berisi tool call menghasilkan dua event AG-UI,
@@ -911,8 +826,8 @@ mod tests {
     async fn notifikasi_tool_call_menghasilkan_dua_event() {
         use agent_client_protocol::schema::v1::ToolCall;
 
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
         let notifikasi = SessionNotification::new(
             "sesi-uji",
@@ -920,35 +835,35 @@ mod tests {
                 ToolCall::new("call-1", "midscene__act").raw_input(json!({ "instruction": "klik" })),
             ),
         );
-        agen.kirim_notifikasi(
+        agen.send_notification(
             "session/update",
             serde_json::to_value(&notifikasi).expect("harus terserialisasi"),
         );
 
-        let (_, mulai) = agen.event().await;
+        let (_, mulai) = agen.next_event().await;
         assert_eq!(mulai["type"], "TOOL_CALL_START");
         assert_eq!(mulai["toolCallId"], "call-1");
 
-        let (_, argumen) = agen.event().await;
+        let (_, argumen) = agen.next_event().await;
         assert_eq!(argumen["type"], "TOOL_CALL_ARGS");
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
     /// **Kelalaian kedua yang ditutup Task 6.** Sampai sekarang tidak ada test
     /// yang menyentuh *pendaftaran* handler izin: semuanya memanggil `refuse`
-    /// langsung. Bila handler terpasang pada tipe request yang salah, crate
-    /// membalas `method_not_found` dan seluruh test lama tetap hijau. Test ini
-    /// mengirim `session/request_permission` mentah lewat kawat dan menuntut
-    /// balasan `result`, bukan `error`.
+    /// langsung. Bila handler terpasang pada tipe request yang salah, agen
+    /// tidak menerima balasan sama sekali dan seluruh test lama tetap hijau.
+    /// Test ini mengirim `session/request_permission` mentah lewat kawat dan
+    /// menuntut balasan `result`.
     #[tokio::test]
     async fn dispatch_izin_sungguhan_meneruskan_jawaban_pengguna() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
-        agen.kirim_permintaan(7, "session/request_permission", params_izin());
+        agen.send_request(7, "session/request_permission", params_izin());
 
-        let (nama, payload) = agen.event().await;
+        let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_PERMISSION_REQUEST);
         assert_eq!(payload["options"][0]["optionId"], "ya");
         let request_id = payload["requestId"]
@@ -956,12 +871,12 @@ mod tests {
             .expect("requestId harus string")
             .to_owned();
 
-        assert_eq!(ctx.permissions().jumlah_penunggu(), 1);
+        assert_eq!(ctx.permissions().pending_count(), 1);
         ctx.permissions()
             .jawab(&request_id, "ya")
             .expect("penunggu harus ada");
 
-        let balasan = agen.balasan().await;
+        let balasan = agen.next_line().await;
         assert!(
             balasan.get("error").is_none(),
             "handler izin tidak terpasang pada method yang benar: {balasan}"
@@ -972,81 +887,97 @@ mod tests {
         assert_eq!(balasan["result"]["outcome"]["outcome"], "selected");
         assert_eq!(balasan["result"]["outcome"]["optionId"], "ya");
         assert_eq!(
-            ctx.permissions().jumlah_penunggu(),
+            ctx.permissions().pending_count(),
             0,
             "entri peta harus dibuang setelah dijawab"
         );
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
-    /// Kontrol pembanding untuk test di atas: method yang crate sendiri tidak
-    /// kenal memang dibalas `method not found`
-    /// (`jsonrpc/incoming_actor.rs:631`: *"Rejecting request with error, no
-    /// handler"*). Kedua test memakai kawat yang sama, jadi hanya method yang
-    /// benar-benar terdaftar yang bisa menghasilkan `result`.
-    #[tokio::test]
-    async fn permintaan_tanpa_handler_dibalas_method_not_found() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
-
-        agen.kirim_permintaan(11, "metode/tidak-dikenal", json!({}));
-
-        let balasan = agen.balasan().await;
-        assert_eq!(balasan["id"], 11);
-        assert_eq!(
-            balasan["error"]["code"], -32601,
-            "permintaan tanpa handler harus jadi method not found, dapat: {balasan}"
-        );
-        assert!(balasan.get("result").is_none());
-
-        agen.tutup().await;
-    }
-
-    /// **Temuan yang mengoreksi catatan Task 3.** Method peran klien yang
-    /// *dikenal crate* tetapi tidak kita daftarkan handler-nya **tidak**
-    /// dibalas `method not found`: ia masuk antrean retry
-    /// (`jsonrpc/incoming_actor.rs:617`, `"Retrying message as new dynamic
-    /// handlers are added"`) menunggu handler dinamis yang tidak akan pernah
-    /// muncul. Artinya agen menggantung, bukan menerima galat.
+    /// **Mekanisme sebenarnya**, dikoreksi dari catatan Task 3 dan dari
+    /// kesimpulan pertama saya sendiri di task ini.
     ///
-    /// Konsekuensinya langsung untuk task ini: seandainya gerbang izin
-    /// terpasang pada tipe request yang salah, akibatnya bukan "balasan galat
-    /// yang jelas" melainkan sesi beku tanpa pesan apa pun — justru alasan
-    /// pendaftaran handler harus diuji lewat kawat, bukan lewat pemanggilan
-    /// fungsi pembantunya.
+    /// Pembeda antara "dibalas `method not found`" dan "menggantung" bukan
+    /// apakah crate mengenali method-nya, melainkan apakah `params` punya field
+    /// `sessionId`: `Agent::default_handle_dispatch_from` melakukan
+    /// `let retry = message.has_session_id()` (`src/role/acp.rs:294-313`), dan
+    /// `has_session_id` hanyalah `has_field("sessionId")` (`jsonrpc.rs:4393`).
+    ///
+    /// Method yang **sepenuhnya asing** pun menggantung asal membawa
+    /// `sessionId` — jadi kelas bahayanya jauh lebih luas daripada "method
+    /// yang kebetulan dikenal crate".
     #[tokio::test]
-    async fn permintaan_klien_yang_tak_didaftarkan_menggantung_bukan_ditolak() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
+    async fn permintaan_ber_session_id_tanpa_handler_menggantung() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
-        agen.kirim_permintaan(
+        agen.send_request(
             12,
-            "fs/read_text_file",
-            json!({ "sessionId": "sesi-uji", "path": "/tmp/tidak-ada" }),
+            "metode/sepenuhnya-asing",
+            json!({ "sessionId": "sesi-uji" }),
         );
 
         assert!(
-            agen.balasan_dalam(Duration::from_millis(300)).await.is_none(),
-            "fs/read_text_file tanpa handler ternyata dibalas; catatan modul perlu diperbarui"
+            agen.line_within(Duration::from_millis(300)).await.is_none(),
+            "request ber-sessionId tanpa handler ternyata dibalas; \
+             catatan modul soal has_session_id perlu diperbarui"
         );
 
-        agen.tutup().await;
+        agen.shutdown().await;
+    }
+
+    /// Sisi lain pembeda yang sama: tanpa `sessionId`, method asing yang persis
+    /// sama justru dibalas `-32601`.
+    #[tokio::test]
+    async fn permintaan_tanpa_session_id_dibalas_method_not_found() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        agen.send_request(13, "metode/sepenuhnya-asing", json!({}));
+
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 13);
+        assert_eq!(
+            balasan["error"]["code"], -32601,
+            "dapat: {balasan}"
+        );
+        assert!(balasan.get("result").is_none());
+
+        agen.shutdown().await;
+    }
+
+    /// Dan pengenalan method memang tidak berperan: `fs/read_text_file` adalah
+    /// method peran klien yang dikenal crate, tetapi tanpa `sessionId` ia tetap
+    /// dibalas `-32601`. Inilah yang mematahkan hipotesis "dikenal vs tidak
+    /// dikenal" yang sempat saya tulis.
+    #[tokio::test]
+    async fn method_dikenal_tanpa_session_id_tetap_dibalas_method_not_found() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        agen.send_request(14, "fs/read_text_file", json!({ "path": "/tmp/x" }));
+
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 14);
+        assert_eq!(balasan["error"]["code"], -32601, "dapat: {balasan}");
+
+        agen.shutdown().await;
     }
 
     /// Batas waktu wajib: permintaan yang tidak dijawab harus tetap berakhir
     /// dengan balasan penolakan yang sah, dan entri petanya harus hilang.
     #[tokio::test]
     async fn dispatch_izin_menolak_dan_membersihkan_setelah_batas_waktu() {
-        let (ctx, events) = konteks(Duration::from_millis(50));
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let (ctx, events) = recording_context(Duration::from_millis(50));
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
-        agen.kirim_permintaan(8, "session/request_permission", params_izin());
+        agen.send_request(8, "session/request_permission", params_izin());
 
-        let (nama, _) = agen.event().await;
+        let (nama, _) = agen.next_event().await;
         assert_eq!(nama, EVENT_PERMISSION_REQUEST);
 
-        let balasan = agen.balasan().await;
+        let balasan = agen.next_line().await;
         assert_eq!(balasan["id"], 8);
         assert_eq!(balasan["result"]["outcome"]["outcome"], "selected");
         assert_eq!(
@@ -1054,75 +985,94 @@ mod tests {
             "batas waktu harus memilih opsi penolakan"
         );
         assert_eq!(
-            ctx.permissions().jumlah_penunggu(),
+            ctx.permissions().pending_count(),
             0,
             "entri peta harus dibuang setelah kedaluwarsa"
         );
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
     /// Menunggu izin tidak boleh menahan dispatch loop: notifikasi yang datang
     /// selama dialog terbuka harus tetap sampai ke webview.
     #[tokio::test]
     async fn notifikasi_tetap_mengalir_saat_izin_menunggu() {
-        let (ctx, events) = konteks(Duration::from_secs(30));
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let (ctx, events) = recording_context(Duration::from_secs(30));
+        let mut agen = FakeAgent::start(&ctx, events).await;
 
-        agen.kirim_permintaan(9, "session/request_permission", params_izin());
-        let (nama, payload) = agen.event().await;
+        agen.send_request(9, "session/request_permission", params_izin());
+        let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_PERMISSION_REQUEST);
         let request_id = payload["requestId"].as_str().unwrap().to_owned();
 
-        let notifikasi = SessionNotification::new(
-            "sesi-uji",
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from("sambil jalan"))),
-        );
-        agen.kirim_notifikasi(
-            "session/update",
-            serde_json::to_value(&notifikasi).expect("harus terserialisasi"),
-        );
+        agen.send_notification("session/update", potongan_teks("sambil jalan"));
 
-        let (nama, payload) = agen.event().await;
+        let (nama, payload) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGUI);
         assert_eq!(payload["delta"], "sambil jalan");
 
         ctx.permissions().jawab(&request_id, "tidak").unwrap();
-        let balasan = agen.balasan().await;
+        let balasan = agen.next_line().await;
         assert_eq!(balasan["result"]["outcome"]["optionId"], "tidak");
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
-    /// Transport yang tertutup di luar kehendak kita harus terlihat di webview,
+    /// Transport yang tertutup setelah sesi berdiri harus terlihat di webview,
     /// bukan hanya menjadi `JoinHandle` yang hasilnya dibuang.
     #[tokio::test]
     async fn transport_tertutup_mengemisikan_agent_disconnected() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+        ctx.arm_disconnect_notice();
 
-        agen.putuskan();
+        agen.disconnect();
 
-        let (nama, _) = agen.event().await;
+        let (nama, _) = agen.next_event().await;
         assert_eq!(nama, EVENT_AGENT_DISCONNECTED);
 
-        agen.tutup().await;
+        agen.shutdown().await;
     }
 
     /// Penutupan yang kita minta sendiri bukan kabar buruk dan tidak boleh
     /// memicu peringatan di UI.
     #[tokio::test]
     async fn penutupan_yang_disengaja_tidak_mengemisikan_apa_pun() {
-        let (ctx, events) = konteks(DEFAULT_PERMISSION_TIMEOUT);
-        let mut agen = AgenPalsu::baru(&ctx, events);
-        ctx.tandai_menutup();
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+        ctx.arm_disconnect_notice();
+        ctx.disarm_disconnect_notice();
 
-        agen.putuskan();
-        agen.tunggu_selesai().await;
+        agen.disconnect();
+        agen.wait_closed().await;
 
         assert!(
-            agen.events.try_recv().is_err(),
+            agen.try_next_event().is_none(),
             "penutupan yang disengaja tidak boleh mengemisikan event"
+        );
+    }
+
+    /// Koneksi yang gugur **sebelum** sesi berdiri sudah punya pelapornya
+    /// sendiri: `connect_agent` mengembalikan galat. Mengemisikan
+    /// `agent-disconnected` juga akan membuat webview merender dua kabar untuk
+    /// satu kejadian, dan tidak konsisten dengan jalur batas waktu handshake
+    /// yang `abort()`-nya tidak pernah menjalankan `on_close`.
+    #[tokio::test]
+    async fn putus_sebelum_sesi_berdiri_tidak_mengemisikan_apa_pun() {
+        let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
+        let mut agen = FakeAgent::start(&ctx, events).await;
+
+        assert!(
+            !ctx.notifies_on_close(),
+            "pemberitahuan putus harus mati sampai sesi benar-benar berdiri"
+        );
+
+        agen.disconnect();
+        agen.wait_closed().await;
+
+        assert!(
+            agen.try_next_event().is_none(),
+            "putus sebelum sesi berdiri tidak boleh mengemisikan event"
         );
     }
 }
