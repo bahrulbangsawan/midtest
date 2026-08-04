@@ -24,6 +24,7 @@ export class ToolError extends Error {
 }
 
 export interface ToolResult {
+  [key: string]: unknown;
   content: [{ type: 'text'; text: string }];
   isError: true;
 }
