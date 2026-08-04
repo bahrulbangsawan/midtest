@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createServer } from './server.ts';
@@ -12,7 +11,7 @@ console.error(
   '[midscene-mcp] WARNING: no real device adapters wired yet (Task 9 pending) — all automation is simulated.',
 );
 const sessions = new SessionManager(async (target) => new FakeDevice(target));
-const store = new ScenarioStore(join(homedir(), '.midscene-mcp', 'scenarios'));
+const store = new ScenarioStore(join(process.env.MIDSCENE_MCP_ROOT ?? process.cwd(), 'scenarios'));
 
 const server = createServer({ sessions, store });
 await server.connect(new StdioServerTransport());
