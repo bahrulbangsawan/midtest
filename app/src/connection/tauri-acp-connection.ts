@@ -13,6 +13,12 @@ export interface Deps {
   // unassignable to this field — forcing the call site to cast.
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
+  /**
+   * How long `whenReady()` waits for a listener registration before
+   * rejecting. Defaults to `DEFAULT_READY_TIMEOUT_MS`; tests shorten it so
+   * they can prove the bound exists without waiting for it.
+   */
+  readyTimeoutMs?: number;
 }
 
 /**
@@ -41,7 +47,7 @@ export interface TauriAcpConnection extends SubscribeConnectionAdapter {
    * with `live: true` (so `subscribe()` runs on mount) and `await
    * whenReady()` before issuing each `sendMessage()`.
    *
-   * Two ways this guard could silently *not* guard anything, both closed
+   * Three ways this guard could silently *not* guard anything, all closed
    * here rather than left to the caller:
    *
    * 1. **Called before any `subscribe()`.** There is no listener, so there
@@ -54,10 +60,15 @@ export interface TauriAcpConnection extends SubscribeConnectionAdapter {
    *    replaced while the promise is still pending. `whenReady()` follows
    *    the replacement instead of resolving against the dead listener; if
    *    the listener is torn down and *not* replaced, it rejects.
+   * 3. **A registration that never settles.** `deps.listen()` is an IPC
+   *    round-trip with no delivery guarantee. Waiting on it alone means a
+   *    wedged registration pins the caller forever, so the wait is bounded
+   *    (`Deps.readyTimeoutMs`) and rejects when the bound is hit.
    *
-   * Both failure modes reject rather than hang: a caller that awaits this
-   * before sending will surface an error instead of a spinner that never
-   * stops.
+   * Every path out of `whenReady()` settles: it resolves against a live
+   * listener, or rejects with a reason. It never stays pending — a promise
+   * that never settles is exactly the spinner-forever failure this exists
+   * to prevent, and it would be the hardest version of it to diagnose.
    */
   whenReady: () => Promise<void>;
 }
@@ -136,23 +147,65 @@ function extractLatestText(messages: ReadonlyArray<unknown>): string {
 }
 
 /**
- * Builds a `SubscribeConnectionAdapter` on top of Tauri commands/events:
- * - `send` forwards the latest message's text to the `send_prompt` command.
- * - `subscribe` yields AG-UI events (`StreamChunk`s) delivered via the
- *   `agui` Tauri event.
- */
-/**
  * Bookkeeping for one `subscribe()` call, so `whenReady()` can tell "the
  * listener I am waiting for" apart from "some listener, once, at some point".
  */
 interface Subscription {
   /** Resolves when this call's Tauri listener is registered. */
   readonly ready: Promise<void>;
+  /**
+   * Resolves when a later `subscribe()` takes this one's place as `current`.
+   *
+   * This is what keeps `whenReady()` from hanging. Awaiting `ready` alone
+   * means a caller holding a dead predecessor is chained to *that*
+   * registration promise — and a registration that never settles (a wedged
+   * IPC) never releases it, no matter how alive the replacement is.
+   */
+  readonly superseded: Promise<void>;
+  /** Settles `superseded`. Called exactly once, when `current` moves on. */
+  readonly markSuperseded: () => void;
   /** True once this call's listener has been torn down. */
   readonly isTornDown: () => boolean;
 }
 
+/**
+ * How long `whenReady()` waits for a listener registration before giving up.
+ *
+ * A bound is required, not defensive garnish. `deps.listen()` is an IPC
+ * round-trip; nothing in this module or in Tauri promises that it settles.
+ * Without a bound, one wedged registration turns every later `whenReady()`
+ * into a permanently pending promise, and the UI above it into a spinner
+ * that never stops — the exact failure this whole mechanism exists to
+ * prevent. Ten seconds is far beyond any healthy registration and still
+ * finite.
+ */
+const DEFAULT_READY_TIMEOUT_MS = 10_000;
+
+/**
+ * A promise that rejects after `ms`, plus a way to cancel its timer so a
+ * settled race does not leave one pending.
+ */
+function rejectAfter(ms: number): {
+  promise: Promise<never>;
+  cancel: () => void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Pendaftaran pendengar event agen tidak selesai dalam ${ms} ms. ` +
+            'Sambungan ke proses Tauri kemungkinan tersendat.',
+        ),
+      );
+    }, ms);
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
 export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
+  const readyTimeoutMs = deps.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+
   // The most recent `subscribe()` call, or `undefined` while none has run.
   //
   // `undefined` is load-bearing. The obvious initial value — an
@@ -194,11 +247,22 @@ export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
           releaseListener();
         }
       });
+    let markSuperseded!: () => void;
+    const superseded = new Promise<void>((resolve) => {
+      markSuperseded = resolve;
+    });
     const subscription: Subscription = {
       ready: listenerReady,
+      superseded,
+      markSuperseded,
       isTornDown: () => aborted,
     };
+    // Publish the replacement *before* waking anyone waiting on the one it
+    // replaces, so every woken waiter re-reads a `current` that is already
+    // the new subscription.
+    const previous = current;
     current = subscription;
+    previous?.markSuperseded();
     // Fire-and-forget from this scope's perspective: don't let a
     // registration failure become an "unhandled rejection" before any
     // consumer calls `next()`. `next()` below awaits the same promise
@@ -252,15 +316,33 @@ export function createTauriAcpConnection(deps: Deps): TauriAcpConnection {
       );
     }
 
-    await active.ready;
+    // Three ways out of this wait, and all three must be in the race.
+    //
+    // Awaiting `active.ready` on its own is a hang, not a guard: it chains
+    // the caller to one specific registration promise, so a subscription
+    // that is replaced by a live successor — or whose registration simply
+    // never settles — leaves the caller pending forever. `superseded`
+    // releases the first case; the timeout releases the second.
+    //
+    // It also fixes a false negative: if a superseded registration *rejects*
+    // while its replacement succeeds, `superseded` has already resolved by
+    // then (supersession happens at `subscribe()` time, before the older
+    // registration settles), so the race takes that branch and the stale
+    // rejection is never surfaced against a healthy listener.
+    const budget = rejectAfter(readyTimeoutMs);
+    try {
+      await Promise.race([active.ready, active.superseded, budget.promise]);
+    } finally {
+      budget.cancel();
+    }
 
     if (current !== active) {
-      // A newer `subscribe()` replaced the one we were waiting for while its
-      // registration was still in flight — the StrictMode mount → cleanup →
-      // mount sequence. Resolving now would report a listener that has
-      // already been released, so wait on its replacement instead. The
-      // recursion is bounded by the number of remounts, and each step awaits
-      // a real registration promise rather than spinning.
+      // A newer `subscribe()` replaced the one we were waiting for — the
+      // StrictMode mount → cleanup → mount sequence, or a plain remount.
+      // Resolving now would report a listener that has already been
+      // released, so wait on its replacement instead. The recursion is
+      // bounded by the number of remounts, and each step awaits a real
+      // registration promise rather than spinning.
       return whenReady();
     }
 

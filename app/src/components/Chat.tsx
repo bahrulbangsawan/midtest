@@ -3,7 +3,7 @@ import type { UIMessage } from '@tanstack/ai-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useMemo, useState } from 'react';
-import { LoaderIcon, SendIcon, WrenchIcon } from 'lucide-react';
+import { ArrowDownIcon, LoaderIcon, SendIcon, WrenchIcon } from 'lucide-react';
 
 import { createTauriAcpConnection } from '../connection/tauri-acp-connection';
 import { Button } from '@/components/ui/button';
@@ -96,7 +96,8 @@ export function Chat({ agenTersambung }: ChatProps) {
     agenTersambung && langgananSiap && !mengirim && teks.trim().length > 0;
 
   async function kirim() {
-    const isi = teks.trim();
+    const mentah = teks;
+    const isi = mentah.trim();
     if (!isi || mengirim) return;
 
     setMengirim(true);
@@ -106,8 +107,12 @@ export function Chat({ agenTersambung }: ChatProps) {
       // `send_prompt` jalan; bila pendengar `agui` belum terdaftar saat itu,
       // event-nya hilang dan spinner tidak pernah berhenti.
       await connection.whenReady();
-      setTeks('');
       await sendMessage(isi);
+      // Dikosongkan hanya setelah pengiriman berhasil: kalimat yang gagal
+      // dikirim adalah kalimat yang masih dibutuhkan pengguna. Ditulis
+      // sebagai updater dan dijaga perbandingannya supaya tidak menghapus
+      // teks baru yang sempat diketik selama pengiriman berlangsung.
+      setTeks((sekarang) => (sekarang === mentah ? '' : sekarang));
     } catch (penyebab) {
       setGalatLokal(pesanGalat(penyebab));
     } finally {
@@ -184,7 +189,17 @@ export function Chat({ agenTersambung }: ChatProps) {
               )}
             </MessageScrollerContent>
           </MessageScrollerViewport>
-          <MessageScrollerButton />
+          {/*
+            `children` diberikan sendiri karena bawaan komponennya menulis
+            teks `sr-only` berbahasa Inggris ("Scroll to end"). Itu hanya
+            terdengar oleh pembaca layar — satu-satunya kelompok pengguna yang
+            tidak akan pernah melihat bahwa sisa antarmukanya berbahasa
+            Indonesia.
+          */}
+          <MessageScrollerButton>
+            <ArrowDownIcon />
+            <span className="sr-only">Gulir ke pesan terbaru</span>
+          </MessageScrollerButton>
         </MessageScroller>
       </MessageScrollerProvider>
 

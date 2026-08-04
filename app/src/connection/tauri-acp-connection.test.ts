@@ -91,22 +91,54 @@ test('abortSignal melepas listener yang sudah terdaftar sebelumnya', async () =>
  * so. Production `listen()` is an IPC round-trip; the synchronous double above
  * hides exactly the window `whenReady()` exists to close.
  */
-function depsTertunda() {
-  const daftarkan: Array<(stop: () => void) => void> = [];
+function depsTertunda(readyTimeoutMs?: number) {
+  const daftarkan: Array<{
+    resolve: (stop: () => void) => void;
+    reject: (penyebab: unknown) => void;
+  }> = [];
   const stop = vi.fn();
   return {
     invoke: vi.fn(async () => undefined),
     listen: vi.fn(
       () =>
-        new Promise<() => void>((resolve) => {
-          daftarkan.push(resolve);
+        new Promise<() => void>((resolve, reject) => {
+          daftarkan.push({ resolve, reject });
         }),
     ),
+    readyTimeoutMs,
     stop,
     /** Selesaikan pendaftaran listener ke-`indeks`. */
-    selesaikan: (indeks: number) => daftarkan[indeks]?.(stop),
+    selesaikan: (indeks: number) => daftarkan[indeks]?.resolve(stop),
+    /** Gagalkan pendaftaran listener ke-`indeks`. */
+    gagalkan: (indeks: number, penyebab: unknown) =>
+      daftarkan[indeks]?.reject(penyebab),
     jumlahTertunda: () => daftarkan.length,
   };
+}
+
+/**
+ * Beri promise kesempatan untuk selesai tanpa membiarkan test menggantung
+ * bila ternyata ia tidak pernah selesai — inti dari seluruh berkas ini.
+ */
+async function hasilnya(
+  promise: Promise<unknown>,
+): Promise<'selesai' | 'menolak' | 'menggantung'> {
+  const penanda = Symbol('menggantung');
+  const hasil = await Promise.race([
+    promise.then(
+      () => 'selesai' as const,
+      () => 'menolak' as const,
+    ),
+    // Satu macrotask. Rantai `.then` di adapter — termasuk rekursi
+    // `whenReady()` — seluruhnya microtask, dan antrean microtask selalu
+    // terkuras habis sebelum timer 0 ms berjalan. Menghitung putaran
+    // microtask satu per satu (dan salah hitung) adalah cara test ini
+    // sempat melaporkan "menggantung" untuk promise yang sebenarnya sehat.
+    new Promise<typeof penanda>((resolve) => {
+      setTimeout(() => resolve(penanda), 0);
+    }),
+  ]);
+  return hasil === penanda ? 'menggantung' : hasil;
 }
 
 test('whenReady menolak bila dipanggil sebelum subscribe() pernah jalan', async () => {
@@ -177,4 +209,76 @@ test('whenReady menolak bila langganan dibatalkan tanpa pengganti', async () => 
   d.selesaikan(0);
 
   await expect(menunggu).rejects.toThrow(/sudah dilepas/);
+});
+
+/**
+ * Probe 1 dari tinjauan. Menunggu `ready` saja adalah kemacetan, bukan
+ * gerbang: pemanggil yang tertambat pada langganan mati tidak akan pernah
+ * dilepaskan oleh pengganti yang justru sudah hidup.
+ */
+test('whenReady selesai lewat pengganti yang hidup walau pendaftaran lama tidak pernah selesai', async () => {
+  const d = depsTertunda();
+  const conn = createTauriAcpConnection(d);
+
+  const ac = new AbortController();
+  conn.subscribe(ac.signal);
+  const menunggu = conn.whenReady(); // ditangkap pada langganan #1
+
+  ac.abort();
+  conn.subscribe(); // #2
+  d.selesaikan(1); // hanya #2 yang terdaftar; #1 tidak pernah selesai
+
+  expect(await hasilnya(menunggu)).toBe('selesai');
+});
+
+/**
+ * Probe 2 dari tinjauan. Pendaftaran lama yang *gagal* tidak boleh
+ * dilaporkan sebagai kegagalan ketika penggantinya hidup.
+ */
+test('whenReady tidak menolak karena pendaftaran lama gagal bila penggantinya hidup', async () => {
+  const d = depsTertunda();
+  const conn = createTauriAcpConnection(d);
+
+  const ac = new AbortController();
+  conn.subscribe(ac.signal);
+  const menunggu = conn.whenReady();
+
+  ac.abort();
+  conn.subscribe(); // #2
+  d.gagalkan(0, new Error('IPC pendaftaran #1 gagal'));
+  d.selesaikan(1);
+
+  expect(await hasilnya(menunggu)).toBe('selesai');
+});
+
+/**
+ * Jalur produksi yang sebenarnya, dan yang belum diuji sama sekali:
+ * `whenReady()` dipanggil *setelah* remount selesai, terhadap langganan #2.
+ */
+test('whenReady selesai bila dipanggil setelah remount, terhadap langganan kedua', async () => {
+  const d = depsTertunda();
+  const conn = createTauriAcpConnection(d);
+
+  const ac = new AbortController();
+  conn.subscribe(ac.signal);
+  ac.abort();
+  conn.subscribe(); // #2, satu-satunya yang hidup
+
+  const menunggu = conn.whenReady(); // ditangkap setelah remount
+  expect(await hasilnya(menunggu)).toBe('menggantung');
+
+  d.selesaikan(1);
+  expect(await hasilnya(menunggu)).toBe('selesai');
+});
+
+/**
+ * Batas waktu wajib: pendaftaran yang tersendat tanpa pengganti harus
+ * berakhir dengan penolakan, bukan promise yang menggantung selamanya.
+ */
+test('whenReady menolak bila pendaftaran tersendat melewati batas waktu', async () => {
+  const d = depsTertunda(20);
+  const conn = createTauriAcpConnection(d);
+  conn.subscribe(); // pendaftarannya tidak pernah diselesaikan
+
+  await expect(conn.whenReady()).rejects.toThrow(/tidak selesai dalam 20 ms/);
 });

@@ -139,7 +139,15 @@ export function PermissionDialog() {
     } catch (penyebab) {
       // Permintaan basi (sudah kedaluwarsa atau dibatalkan agen) tetap harus
       // menutup dialognya — kalau tidak, dialog mati menghalangi yang berikut.
-      setGalat(String(penyebab));
+      //
+      // Nama alatnya ikut disebut karena pesan ini dirender di luar dialog,
+      // dan permintaan berikutnya bisa sudah terbuka saat pengguna membacanya.
+      // Tanpa nama, kalimatnya terbaca seolah permintaan yang sedang tampil
+      // itulah yang gagal.
+      setGalat(
+        `Jawaban untuk permintaan izin "${namaAlat(permintaan)}" tidak sampai: ` +
+          `${String(penyebab)}`,
+      );
     } finally {
       setAntrean((sebelumnya) =>
         sebelumnya.filter((a) => a.requestId !== permintaan.requestId),
@@ -151,45 +159,60 @@ export function PermissionDialog() {
   const opsi = permintaan?.options ?? [];
 
   return (
-    <Dialog open={permintaan !== undefined}>
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>Agen meminta izin</DialogTitle>
-          <DialogDescription>
-            Agen ingin menjalankan alat{' '}
-            <span className="font-mono text-foreground">
-              {permintaan ? namaAlat(permintaan) : ''}
-            </span>
-            . Pilih salah satu di bawah. Tanpa jawaban, permintaan ini ditolak
-            sendiri setelah dua menit.
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      {/*
+        Di luar `<Dialog>`, dengan sengaja. Radix melepas `DialogContent` dari
+        DOM setiap kali `open` bernilai false, dan `open` di sini berarti
+        "antrean tidak kosong". Pesan galat justru paling dibutuhkan ketika
+        antreannya kosong: bila pendaftaran pendengar `permission-request`
+        gagal, tidak akan pernah ada permintaan yang masuk, jadi dialognya
+        tidak pernah terbuka — dan pesan yang ditaruh di dalamnya tidak akan
+        pernah terlihat. Yang tampak bagi pengguna hanyalah agen yang menolak
+        segala sesuatu tanpa sebab, setiap dua menit sekali.
+      */}
+      {galat ? (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+        >
+          {galat}
+        </p>
+      ) : null}
 
-        {galat ? (
-          <p role="alert" className="text-sm text-destructive">
-            {galat}
-          </p>
-        ) : null}
+      <Dialog open={permintaan !== undefined}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Agen meminta izin</DialogTitle>
+            <DialogDescription>
+              Agen ingin menjalankan alat{' '}
+              <span className="font-mono text-foreground">
+                {permintaan ? namaAlat(permintaan) : ''}
+              </span>
+              . Pilih salah satu di bawah. Tanpa jawaban, permintaan ini
+              ditolak sendiri setelah dua menit.
+            </DialogDescription>
+          </DialogHeader>
 
-        {opsi.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            Agen tidak menawarkan pilihan apa pun untuk permintaan ini.
-          </p>
-        ) : null}
+          {opsi.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Agen tidak menawarkan pilihan apa pun untuk permintaan ini.
+            </p>
+          ) : null}
 
-        <DialogFooter>
-          {opsi.map((pilihan) => (
-            <Button
-              key={pilihan.optionId}
-              variant={varianTombol(pilihan)}
-              disabled={menjawab}
-              onClick={() => void jawab(pilihan.optionId)}
-            >
-              {pilihan.name}
-            </Button>
-          ))}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <DialogFooter>
+            {opsi.map((pilihan) => (
+              <Button
+                key={pilihan.optionId}
+                variant={varianTombol(pilihan)}
+                disabled={menjawab}
+                onClick={() => void jawab(pilihan.optionId)}
+              >
+                {pilihan.name}
+              </Button>
+            ))}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
