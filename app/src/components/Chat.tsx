@@ -3,7 +3,13 @@ import type { UIMessage } from '@tanstack/ai-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowDownIcon, LoaderIcon, SendIcon, WrenchIcon } from 'lucide-react';
+import {
+  ArrowDownIcon,
+  CircleStopIcon,
+  LoaderIcon,
+  SendIcon,
+  WrenchIcon,
+} from 'lucide-react';
 
 import { createTauriAcpConnection } from '../connection/tauri-acp-connection';
 import { Button } from '@/components/ui/button';
@@ -58,7 +64,13 @@ export function Chat({ agenTersambung }: ChatProps) {
     () => createTauriAcpConnection({ invoke, listen }),
     [],
   );
-  const { messages, sendMessage, isLoading, error } = useChat({
+  // `isLoading` sengaja tidak diambil di sini: `mengirim` di bawah sudah
+  // menutupi seluruh masa hidupnya. `kirim()` menahan `mengirim` sampai
+  // `sendMessage()` selesai, dan `sendMessage()` (lewat `ChatClient` di
+  // `@tanstack/ai-react`) tidak selesai sampai giliran itu sendiri selesai —
+  // yaitu sampai potongan `RUN_FINISHED` diproses. Jadi `isLoading` tidak
+  // pernah `true` ketika `mengirim` `false`.
+  const { messages, sendMessage, error } = useChat({
     connection,
     live: true,
   });
@@ -66,7 +78,24 @@ export function Chat({ agenTersambung }: ChatProps) {
   const [teks, setTeks] = useState('');
   const [langgananSiap, setLanggananSiap] = useState(false);
   const [galatLokal, setGalatLokal] = useState<string | null>(null);
+  /**
+   * `true` sejak `kirim()` dipanggil sampai `sendMessage()`-nya selesai —
+   * yang mana, seperti dijelaskan di atas, adalah durasi giliran itu
+   * sendiri. Tombol stop memakai keadaan yang sama persis: menekannya hanya
+   * meminta pembatalan (lewat `cancel_turn`), bukan mengubah keadaan ini.
+   * Giliran berakhir — dan `mengirim` kembali `false` — hanya lewat jalur
+   * `RUN_FINISHED` yang normal, persis seperti giliran yang selesai sendiri.
+   */
   const [mengirim, setMengirim] = useState(false);
+  /**
+   * `true` selama panggilan `cancel_turn` sedang berjalan. Ini bukan
+   * penanda "giliran sudah berhenti" — lihat dokumentasi Rust pada
+   * `cancel_turn`: perintah itu kembali begitu notifikasi pembatalan
+   * terkirim, bukan begitu giliran benar-benar berakhir. Keadaan ini
+   * hanya mencegah dua panggilan `cancel_turn` bertumpuk dan memberi tahu
+   * pengguna bahwa permintaannya sedang diproses.
+   */
+  const [membatalkan, setMembatalkan] = useState(false);
 
   // Efek ini hidup di komponen yang sama dengan `useChat` di atas, sehingga
   // `subscribe()` dijamin sudah dipanggil ketika badan efek ini jalan.
@@ -117,6 +146,35 @@ export function Chat({ agenTersambung }: ChatProps) {
       setGalatLokal(pesanGalat(penyebab));
     } finally {
       setMengirim(false);
+    }
+  }
+
+  /**
+   * Minta agen menghentikan giliran yang sedang berjalan.
+   *
+   * `invoke('cancel_turn')` yang selesai (`Ok`) hanya berarti notifikasi
+   * pembatalan sudah masuk antrean — bukan bahwa giliran sudah berhenti.
+   * Giliran itu berakhir belakangan, saat agen menjawab prompt yang tertunda
+   * dengan `Cancelled`, dan itu sampai ke sini lewat jalur `RUN_FINISHED`
+   * yang sudah ada (yang pada gilirannya menyelesaikan `sendMessage()` di
+   * `kirim()` dan mengembalikan `mengirim` ke `false`). Karena itu fungsi
+   * ini SENGAJA tidak menyentuh `mengirim` sama sekali, baik saat berhasil
+   * maupun gagal — menyentuhnya di sini akan mengaku giliran sudah selesai
+   * padahal belum.
+   */
+  async function hentikan() {
+    if (membatalkan) return;
+
+    setMembatalkan(true);
+    setGalatLokal(null);
+    try {
+      await invoke('cancel_turn');
+    } catch (penyebab) {
+      // Percobaan pertama yang gagal tidak boleh mematikan tombolnya:
+      // pengguna harus bisa mencoba lagi.
+      setGalatLokal(pesanGalat(penyebab));
+    } finally {
+      setMembatalkan(false);
     }
   }
 
@@ -237,14 +295,26 @@ export function Chat({ agenTersambung }: ChatProps) {
           placeholder="Minta sesuatu — misalnya: buat dokumentasi alur checkout"
           className="min-h-[72px] resize-none"
         />
-        <Button type="submit" disabled={!bolehKirim}>
-          {isLoading || mengirim ? (
-            <LoaderIcon className="animate-spin" />
-          ) : (
+        {mengirim ? (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={membatalkan}
+            onClick={() => void hentikan()}
+          >
+            {membatalkan ? (
+              <LoaderIcon className="animate-spin" />
+            ) : (
+              <CircleStopIcon />
+            )}
+            Hentikan
+          </Button>
+        ) : (
+          <Button type="submit" disabled={!bolehKirim}>
             <SendIcon />
-          )}
-          Kirim
-        </Button>
+            Kirim
+          </Button>
+        )}
       </form>
     </div>
   );
