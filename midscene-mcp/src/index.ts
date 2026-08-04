@@ -10,8 +10,10 @@ import { ScenarioStore } from './scenarios.ts';
 console.error(
   '[midscene-mcp] WARNING: no real device adapters wired yet (Task 9 pending) — all automation is simulated.',
 );
+const root = process.env.MIDSCENE_MCP_ROOT ?? process.cwd();
 const sessions = new SessionManager(async (target) => new FakeDevice(target));
-const store = new ScenarioStore(join(process.env.MIDSCENE_MCP_ROOT ?? process.cwd(), 'scenarios'));
+const store = new ScenarioStore(join(root, 'scenarios'));
+const buildDemoPath = join(root, '..', 'build-demo.js');
 
-const server = createServer({ sessions, store });
+const server = createServer({ sessions, store, buildDemoPath });
 await server.connect(new StdioServerTransport());

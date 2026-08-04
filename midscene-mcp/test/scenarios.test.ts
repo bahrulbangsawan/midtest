@@ -11,6 +11,8 @@ import { createServer } from '../src/server.ts';
 import { SessionManager } from '../src/session.ts';
 import { FakeDevice } from '../src/devices/fake.ts';
 
+const BUILD_DEMO = join(import.meta.dirname, '..', '..', 'build-demo.js');
+
 async function buatStore() {
   const dir = await mkdtemp(join(tmpdir(), 'skenario-'));
   return { store: new ScenarioStore(dir), dir };
@@ -63,7 +65,7 @@ async function hubungkanDenganStore(opsi: HubungkanOpsi = {}) {
     dibuat.push(device);
     return device;
   }, 40);
-  const server = createServer({ sessions, store });
+  const server = createServer({ sessions, store, buildDemoPath: BUILD_DEMO });
   const client = new Client({ name: 'test', version: '0' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
