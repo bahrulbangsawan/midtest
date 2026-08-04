@@ -96,11 +96,53 @@ skenario diubah, berkas di-regenerate dan entri lama yang nomornya cocok diperta
 
 - Sidebar: daftar bernomor, klik untuk lompat, penanda langkah aktif
 - Navigasi: tombol prev/next, panah kiri/kanan, Home/End
+- Panel kendali di atas panggung: Putar/Jeda, garis waktu, pengatur kecepatan
+  (0,5× / 1× / 1,5× / 2×), tombol perbesar area
 - Penanda: lingkaran berdenyut di titik interaksi; tampilan auto-zoom ke sekitar
   penanda dengan tombol "Lihat layar penuh"
 - Langkah tanpa penanda (ambil data / verifikasi) tampil layar penuh
 - Responsif: sidebar pindah ke atas pada layar sempit
 - Mendukung mode terang dan gelap
+
+## Gerak
+
+Midscene tidak pernah merekam layar — tidak ada `MediaRecorder`, `ffmpeg`, atau
+perekam layar di `@midscene/computer`. Yang tersedia hanya tangkapan layar diskret
+(8 gambar unik untuk run contoh). Fitur "Replay" di report bawaan pun bukan rekaman:
+ia menganimasikan gambar-gambar itu di atas canvas lalu merekamnya dengan
+`MediaRecorder` + `canvas.captureStream()`.
+
+Gerak di panduan ini dibangun dengan cara serupa, tetapi langsung sebagai animasi DOM.
+Urutan satu langkah:
+
+| Waktu | Kejadian |
+|---|---|
+| 100 ms | Kursor sintetis mulai meluncur dari posisi langkah sebelumnya (800 ms) |
+| 900 ms | Penanda lingkaran memudar masuk lalu berdenyut |
+| 1200 ms | Layar "sebelum" menyilang ke layar "sesudah" (600 ms) |
+| 0–4200 ms | Zoom perlahan 1,0 → 1,09 dengan titik pusat di penanda |
+| 3000 ms | Langkah berikutnya (2000 ms untuk langkah tanpa penanda) |
+
+Semua durasi dibagi faktor kecepatan yang dipilih pengguna.
+
+Dipakai **Web Animations API**, bukan transisi CSS: waktunya eksplisit, `transform`
+dan `opacity` dijalankan di compositor, dan animasi bisa dibatalkan satu per satu
+saat pengguna berpindah langkah atau menyalakan zoom manual.
+
+Kursor digerakkan lewat `transform: translate()`, bukan perubahan `left`/`top`,
+supaya tidak memicu layout tiap frame. Posisi akhirnya dipaku di `left`/`top`
+sasaran, dan simpangan dari titik sebelumnya dihitung dalam piksel saat animasi mulai.
+
+`prefers-reduced-motion: reduce` dihormati: seluruh gerak dilewati, langsung ke
+keadaan akhir.
+
+### Catatan pengujian
+
+Gerakan **tidak dapat diverifikasi** dengan `chrome-headless-shell
+--virtual-time-budget`: jam animasi dibekukan di sana, sehingga seluruh animasi
+melapor `currentTime: 0` walau `playState: running`. Verifikasi harus memakai
+browser berjam nyata (mis. playwright-core) dan membaca posisi terhitung pada
+beberapa titik waktu.
 
 ## Struktur kode
 
