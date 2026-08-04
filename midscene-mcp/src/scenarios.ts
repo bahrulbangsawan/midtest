@@ -1,13 +1,92 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { parseYamlScript } from '@midscene/core/yaml';
+import { parseYamlScript, resolveWebTarget, type WebTargetConfig } from '@midscene/core/yaml';
 import { ToolError } from './errors.ts';
 
 const NAMA_SAH = /^[a-zA-Z0-9_-]+$/;
 
+/** The parsed shape this module reads: the tasks it counts plus the web target aliases. */
+type SkripSkenario = { tasks?: Array<{ flow?: unknown[] }> } & WebTargetConfig;
+
+/** Everything `run_scenario` needs to know about a saved scenario before it opens a session. */
+export interface AnalisisSkenario {
+  /** How many budget units one replay costs — see `hitungLangkah`. */
+  langkah: number;
+  /** The address the replay must open before the flow runs, if the scenario declares one. */
+  url: string | undefined;
+}
+
+/**
+ * Read a saved scenario once and answer both questions `run_scenario` asks of it.
+ *
+ * Deliberately *one* function rather than a cost reader and a URL reader side by side:
+ * two entry points would mean two `parseYamlScript` calls over the same document, free
+ * to disagree after a Midscene upgrade — the budget guard seeing one script and the
+ * navigation seeing another. Everything below takes the already-parsed script.
+ */
+export function analisaSkenario(yaml: string): AnalisisSkenario {
+  const skrip = uraikanSkenario(yaml);
+  // Order matters: the step guards refuse unbudgetable scenarios, and a scenario that is
+  // refused should say so rather than complain about its URL.
+  const langkah = hitungLangkah(skrip);
+  return { langkah, url: ambilUrl(skrip) };
+}
+
 /**
  * How many budget units one replay of `yaml` costs.
  *
+ * Kept as the name the cost guard's tests drive, and as a thin projection of
+ * `analisaSkenario` — never a second parse of its own.
+ */
+export function hitungLangkahSkenario(yaml: string): number {
+  return analisaSkenario(yaml).langkah;
+}
+
+function uraikanSkenario(yaml: string): SkripSkenario {
+  try {
+    return parseYamlScript(yaml);
+  } catch (err) {
+    throw new ToolError(
+      'INTERNAL',
+      `scenario YAML could not be parsed, so its cost cannot be capped: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * The address a replay must open before the flow runs, or `undefined` if the scenario
+ * names none.
+ *
+ * **Why this is read at all.** `Agent.runYaml` (`@midscene/core`, `agent.js:642`) builds a
+ * `ScriptPlayer` over the agent it is *already* bound to; nothing in that path navigates.
+ * So a `url:` sitting in a saved scenario is inert unless the session opens it first —
+ * which is exactly how replay ended up asserting against a blank page.
+ *
+ * **Why Midscene's own resolver.** Four keys alias the web environment — `page`,
+ * `browser`, `web`, `target`. Midscene defines *no* precedence between them: its
+ * `resolveWebTarget` (`@midscene/core/dist/lib/yaml/utils.js`, `webTargetSources`)
+ * collects every alias present and throws "Only one web target can be specified" the
+ * moment two appear, so precedence can never be observed. `parseYamlScript` runs it on
+ * every document it loads, which is why a multi-alias scenario is rejected before it
+ * reaches this function. Calling that same resolver here — instead of re-deriving the
+ * alias list — is what stops this reader from drifting away from the runner it feeds.
+ */
+function ambilUrl(skrip: SkripSkenario): string | undefined {
+  return bersihkanUrl(resolveWebTarget(skrip)?.target?.url);
+}
+
+/**
+ * A URL is only a URL if it has content. A blank `url:` must read as *absent* so the
+ * missing-target refusal fires, rather than being handed to `page.goto('')`.
+ */
+export function bersihkanUrl(url: string | undefined): string | undefined {
+  const dipangkas = url?.trim();
+  return dipangkas ? dipangkas : undefined;
+}
+
+/**
  * Every entry in every task's `flow` counts as one unit. Counting *all* steps rather
  * than only the `ai*` ones is deliberate: this is a cost guard, so it must round
  * towards charging more, and Midscene's flow vocabulary grows between releases — a
@@ -20,18 +99,7 @@ const NAMA_SAH = /^[a-zA-Z0-9_-]+$/;
  *
  * One flow key is refused outright rather than counted — see `LANGKAH_TAK_TERBATAS`.
  */
-export function hitungLangkahSkenario(yaml: string): number {
-  let skrip: { tasks?: Array<{ flow?: unknown[] }> };
-  try {
-    skrip = parseYamlScript(yaml);
-  } catch (err) {
-    throw new ToolError(
-      'INTERNAL',
-      `scenario YAML could not be parsed, so its cost cannot be capped: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-  }
+function hitungLangkah(skrip: SkripSkenario): number {
   // `parseYamlScript` itself enforces that `tasks` is an array ("property \"tasks\" must
   // be an array in yaml script"), and `ScriptPlayer` calls `.map` on it, so a non-array
   // `tasks` cannot reach a single AI call. `flow` gets neither guarantee — see below.

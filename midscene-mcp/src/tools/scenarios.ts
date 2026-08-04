@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SessionManager } from '../session.ts';
 import type { ScenarioStore } from '../scenarios.ts';
-import { hitungLangkahSkenario } from '../scenarios.ts';
+import { analisaSkenario, bersihkanUrl } from '../scenarios.ts';
 import { ToolError, toToolResult } from '../errors.ts';
 
 export function registerScenarioTools(
@@ -51,16 +51,23 @@ export function registerScenarioTools(
     'run_scenario',
     {
       description:
-        'Replay a saved scenario end to end with the Midscene cache enabled. Cached steps skip the vision model entirely, but a replay is still charged against the session budget up front: one AI operation per flow step in the scenario YAML. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs, and one containing runGherkinScenario is refused with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run. Use this for regression runs.',
+        'Replay a saved scenario end to end with the Midscene cache enabled. For a web target the session first opens the address the scenario declares in its own YAML (page:, browser:, web: or target: — Midscene accepts exactly one of them, each with a url:), so a saved scenario is self-contained; pass url to replay the same flow somewhere else. A web scenario that names no address anywhere is refused with SCENARIO_NO_URL rather than replayed against a blank page. Cached steps skip the vision model entirely, but a replay is still charged against the session budget up front: one AI operation per flow step in the scenario YAML. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs, and one containing runGherkinScenario is refused with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run. Use this for regression runs.',
       inputSchema: {
         name: z.string(),
         target: z.enum(['web', 'computer']),
+        url: z
+          .string()
+          .optional()
+          .describe(
+            'Replay against this address instead of the one saved in the scenario YAML. Web target only; ignored for "computer", which has no address to open.',
+          ),
       },
     },
-    async ({ name, target }) => {
+    async ({ name, target, url }) => {
       try {
         const yaml = await store.load(name);
-        const langkah = hitungLangkahSkenario(yaml);
+        // One parse serves both the cost guard and the navigation: see `analisaSkenario`.
+        const { langkah, url: urlYaml } = analisaSkenario(yaml);
         // Refuse before `start`: an oversized scenario must not open a browser or grab
         // the desktop just to be rejected a moment later. `spend` below is still the
         // authoritative reservation.
@@ -71,7 +78,23 @@ export function registerScenarioTools(
               'split the scenario or raise MIDSCENE_MCP_BUDGET',
           );
         }
-        await sessions.start(target);
+        // `Agent.runYaml` replays the flow on the agent it is already bound to and never
+        // navigates, so the address in the YAML only takes effect if the session opens it.
+        // Same convention as `start_session`: a url is a web-only notion, and the computer
+        // adapter ignores it, so it is dropped here and the caller is told.
+        const urlDipakai =
+          target === 'web' ? (bersihkanUrl(url) ?? urlYaml) : undefined;
+        if (target === 'web' && urlDipakai === undefined) {
+          throw new ToolError(
+            'SCENARIO_NO_URL',
+            `scenario "${name}" is being replayed on the web but names no address, so it ` +
+              'would run against a blank page and every step would fail. Give the scenario ' +
+              'a target block of its own — "web:\\n  url: https://example.com\\n" above ' +
+              '"tasks:" (page:, browser: and target: are the other accepted spellings; use ' +
+              'exactly one) — or pass the url argument to replay it elsewhere.',
+          );
+        }
+        await sessions.start(target, { url: urlDipakai });
         try {
           sessions.spend(langkah);
           const device = sessions.current();
@@ -83,9 +106,16 @@ export function registerScenarioTools(
           });
           const report = device.reportPath();
           const biaya = `Charged ${langkah} of ${sessions.limit} AI operations.`;
+          const dibuka = urlDipakai ? ` at ${urlDipakai}` : '';
+          // Worded exactly as `start_session` words it, for the same reason: a url handed
+          // to a desktop session is a caller mistake worth naming, not worth failing over.
+          const diabaikan =
+            url && urlDipakai === undefined
+              ? ' Note: url was ignored — it applies to the web target only.'
+              : '';
           const teks = report
-            ? `Scenario "${name}" finished. ${biaya} Report: ${report}`
-            : `Scenario "${name}" finished. ${biaya} No report was written.`;
+            ? `Scenario "${name}" finished${dibuka}. ${biaya} Report: ${report}${diabaikan}`
+            : `Scenario "${name}" finished${dibuka}. ${biaya} No report was written.${diabaikan}`;
           return { content: [{ type: 'text' as const, text: teks }] };
         } finally {
           await sessions.end();

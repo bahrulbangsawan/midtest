@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ScenarioStore, hitungLangkahSkenario } from '../src/scenarios.ts';
+import { ScenarioStore, analisaSkenario, hitungLangkahSkenario } from '../src/scenarios.ts';
 import { ToolError } from '../src/errors.ts';
+import type { StartOpts } from '../src/session.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../src/server.ts';
@@ -56,28 +57,45 @@ interface HubungkanOpsi {
   limit?: number;
 }
 
-/** YAML skenario dengan `jumlah` langkah `ai` di satu task. */
+/** Alamat bawaan untuk skenario web di tes ini. Tidak pernah dibuka sungguhan. */
+const URL_YAML = 'https://contoh.test/beranda';
+
+/**
+ * YAML skenario dengan `jumlah` langkah `ai` di satu task.
+ *
+ * Blok `web:` ikut ditulis karena itulah bentuk skenario yang bisa diputar ulang:
+ * sejak run_scenario menolak target web tanpa alamat, skenario tanpa blok ini tidak
+ * mewakili apa pun yang benar-benar dipakai.
+ */
 function yamlDenganLangkah(jumlah: number): string {
   const flow = Array.from({ length: jumlah }, (_, i) => `      - ai: langkah ${i + 1}`).join('\n');
-  return `tasks:\n  - name: alur\n    flow:\n${flow}\n`;
+  return `web:\n  url: ${URL_YAML}\ntasks:\n  - name: alur\n    flow:\n${flow}\n`;
+}
+
+/** YAML satu langkah dengan alias target web yang dipilih pemanggil. */
+function yamlDenganAlias(alias: 'page' | 'browser' | 'web' | 'target', url: string): string {
+  return `${alias}:\n  url: ${url}\ntasks:\n  - name: alur\n    flow:\n      - ai: satu\n`;
 }
 
 async function hubungkanDenganStore(opsi: HubungkanOpsi = {}) {
   const { store, dir } = await buatStore();
   const dibuat: FakeDevice[] = [];
-  const sessions = new SessionManager(async (target) => {
+  /** Opsi yang diterima SessionManager.start untuk tiap sesi, sejajar dengan `dibuat`. */
+  const opsiSesi: StartOpts[] = [];
+  const sessions = new SessionManager(async (target, opts) => {
     const device = new FakeDevice(target);
     if (opsi.failNext !== undefined) {
       device.failNext = opsi.failNext;
     }
     dibuat.push(device);
+    opsiSesi.push(opts);
     return device;
   }, opsi.limit ?? 40);
   const server = createServer({ sessions, store, buildDemoPath: BUILD_DEMO });
   const client = new Client({ name: 'test', version: '0' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
-  return { client, dibuat, store, dir };
+  return { client, dibuat, opsiSesi, store, dir };
 }
 
 test('save_scenario menulis YAML ke disk', async () => {
@@ -91,13 +109,14 @@ test('save_scenario menulis YAML ke disk', async () => {
 
 test('run_scenario memulai sesi dan meneruskan YAML ke device', async () => {
   const { client, store, dibuat } = await hubungkanDenganStore();
-  await store.save('checkout', 'tasks: []\n');
+  const yaml = `web:\n  url: ${URL_YAML}\ntasks: []\n`;
+  await store.save('checkout', yaml);
   await client.callTool({
     name: 'run_scenario',
     arguments: { name: 'checkout', target: 'web' },
   });
   assert.equal(dibuat.length, 1);
-  assert.deepEqual(dibuat[0].calls, ['runYaml:tasks: []\n']);
+  assert.deepEqual(dibuat[0].calls, [`runYaml:${yaml}`]);
 });
 
 test('run_scenario menutup sesi meski YAML gagal', async () => {
@@ -108,7 +127,7 @@ test('run_scenario menutup sesi meski YAML gagal', async () => {
   const { client, store, dibuat } = await hubungkanDenganStore({
     failNext: 'yaml ditolak device',
   });
-  await store.save('rusak', 'tasks: []\n');
+  await store.save('rusak', `web:\n  url: ${URL_YAML}\ntasks: []\n`);
 
   const hasil = await client.callTool({
     name: 'run_scenario',
@@ -223,12 +242,148 @@ test('run_scenario menjalankan skenario pasangannya yang tanpa gherkin', async (
   const { client, store, dibuat } = await hubungkanDenganStore({ limit: 10 });
   await store.save('tanpa-gherkin', YAML_TANPA_GHERKIN);
   const hasil = await client.callTool({
+    // YAML pasangan ini sengaja tidak punya blok target — alamatnya lewat argumen.
     name: 'run_scenario',
-    arguments: { name: 'tanpa-gherkin', target: 'web' },
+    arguments: { name: 'tanpa-gherkin', target: 'web', url: URL_YAML },
   });
   assert.notEqual(hasil.isError, true);
   assert.match((hasil.content as any)[0].text, /Charged 2 of 10 AI operations\./);
   assert.equal(dibuat.length, 1);
+});
+
+// --- alamat replay: diambil dari YAML, boleh ditimpa argumen, tidak boleh kosong ---
+
+/**
+ * Empat kunci yang dipakai Midscene untuk lingkungan web. Diambil apa adanya dari
+ * `webTargetSources` di `@midscene/core/dist/lib/yaml/utils.js`.
+ */
+const ALIAS_TARGET_WEB = ['page', 'browser', 'web', 'target'] as const;
+
+test('analisaSkenario membaca url dari tiap alias target web Midscene', () => {
+  for (const alias of ALIAS_TARGET_WEB) {
+    const url = `https://contoh.test/${alias}`;
+    const hasil = analisaSkenario(yamlDenganAlias(alias, url));
+    assert.equal(hasil.url, url, `alias "${alias}" harus menghasilkan urlnya sendiri`);
+    assert.equal(hasil.langkah, 1, 'hitungan langkah tidak boleh terpengaruh alias');
+  }
+});
+
+test('analisaSkenario mengembalikan url undefined kalau skenario tidak menyebut alamat', () => {
+  assert.equal(analisaSkenario('tasks: []\n').url, undefined);
+  assert.equal(analisaSkenario('web:\n  url: "   "\ntasks: []\n').url, undefined,
+    'url kosong harus dibaca sebagai tidak ada, bukan diteruskan ke goto("")');
+});
+
+/**
+ * KANARI PRESEDENSI. Midscene tidak menetapkan urutan prioritas antar alias sama
+ * sekali: `resolveWebTarget` mengumpulkan semua alias yang ada lalu melempar begitu
+ * ketemu dua. `parseYamlScript` memanggilnya, jadi dokumen bermulti-alias tidak
+ * pernah sampai ke pembaca url kita. Kalau Midscene suatu saat memilih presedensi
+ * (bukan menolak), tes ini gagal dan memaksa keputusan sadar di sisi kita.
+ */
+test('KANARI: dua alias target web ditolak Midscene, bukan diberi presedensi', () => {
+  let galat: ToolError | undefined;
+  try {
+    analisaSkenario(`web:\n  url: https://a.test\ntarget:\n  url: https://b.test\ntasks: []\n`);
+  } catch (err) {
+    galat = err as ToolError;
+  }
+  assert.ok(galat, 'multi-alias harus melempar');
+  assert.equal(galat.code, 'INTERNAL');
+  assert.match(galat.message, /Only one web target can be specified/);
+});
+
+test('run_scenario meneruskan url dari tiap alias ke sesi yang dibuka', async () => {
+  for (const alias of ALIAS_TARGET_WEB) {
+    const { client, store, dibuat, opsiSesi } = await hubungkanDenganStore();
+    const url = `https://contoh.test/${alias}`;
+    await store.save('lewat-alias', yamlDenganAlias(alias, url));
+    const hasil = await client.callTool({
+      name: 'run_scenario',
+      arguments: { name: 'lewat-alias', target: 'web' },
+    });
+    assert.notEqual(hasil.isError, true, `alias "${alias}" harus bisa diputar`);
+    assert.equal(dibuat.length, 1);
+    assert.deepEqual(opsiSesi, [{ url }], `alias "${alias}" harus sampai ke sesi`);
+    assert.match((hasil.content as any)[0].text, new RegExp(url.replace(/\//g, '\\/')));
+  }
+});
+
+test('argumen url menimpa alamat yang tersimpan di YAML', async () => {
+  const { client, store, opsiSesi } = await hubungkanDenganStore();
+  await store.save('checkout', yamlDenganLangkah(1));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'checkout', target: 'web', url: 'https://staging.test/beranda' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.deepEqual(opsiSesi, [{ url: 'https://staging.test/beranda' }]);
+  assert.notEqual(opsiSesi[0].url, URL_YAML, 'nilai YAML tidak boleh menang atas argumen');
+});
+
+/**
+ * Inti perbaikan ini. Sebelumnya `run_scenario` memanggil `sessions.start(target)` tanpa
+ * url sama sekali, jadi browser diam di halaman kosong dan setiap aiAssert gagal —
+ * persis yang terjadi di e2e sungguhan. Sekarang: ditolak sebelum ada sesi dibuka.
+ */
+test('target web tanpa alamat di mana pun ditolak sebelum sesi dibuka', async () => {
+  const { client, store, dibuat, opsiSesi } = await hubungkanDenganStore();
+  await store.save('tanpa-alamat', 'tasks:\n  - name: t\n    flow:\n      - aiAssert: apa saja\n');
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'tanpa-alamat', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  const teks = (hasil.content as any)[0].text;
+  assert.match(teks, /SCENARIO_NO_URL/);
+  assert.match(teks, /blank page/, 'sebutkan akibatnya, bukan cuma kodenya');
+  assert.match(teks, /web:\\n {2}url: https:\/\/example\.com/, 'sebutkan persis apa yang harus ditambahkan');
+  assert.match(teks, /url argument/, 'sebutkan jalan keluar kedua');
+  assert.match(teks, /Do not retry/);
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser yang dibuka');
+  assert.deepEqual(opsiSesi, []);
+});
+
+test('url kosong di YAML diperlakukan sama dengan tidak ada alamat', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore();
+  await store.save('kosong', 'web:\n  url: ""\ntasks: []\n');
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'kosong', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /SCENARIO_NO_URL/);
+  assert.equal(dibuat.length, 0);
+});
+
+test('SCENARIO_NO_URL tidak ditandai retryable', () => {
+  assert.equal(new ToolError('SCENARIO_NO_URL', 'apa saja').retryable, false);
+});
+
+test('target computer tetap berjalan tanpa alamat dan tidak menerima url', async () => {
+  const { client, store, dibuat, opsiSesi } = await hubungkanDenganStore({ limit: 10 });
+  await store.save('desktop', 'tasks:\n  - name: t\n    flow:\n      - ai: buka Finder\n');
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'desktop', target: 'computer' },
+  });
+  assert.notEqual(hasil.isError, true, 'desktop tidak punya alamat, jadi tidak ada yang ditolak');
+  assert.equal(dibuat.length, 1);
+  assert.equal(dibuat[0].target, 'computer');
+  assert.deepEqual(opsiSesi, [{ url: undefined }]);
+});
+
+test('url pada target computer diabaikan dan dikatakan, seperti start_session', async () => {
+  const { client, store, opsiSesi } = await hubungkanDenganStore({ limit: 10 });
+  // Skenario ini bahkan menyimpan alamat sendiri; desktop tetap tidak memakainya.
+  await store.save('desktop', yamlDenganLangkah(1));
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'desktop', target: 'computer', url: 'https://contoh.test/abaikan' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.deepEqual(opsiSesi, [{ url: undefined }], 'adapter computer tidak boleh dapat url');
+  assert.match((hasil.content as any)[0].text, /url was ignored/);
 });
 
 // --- flow yang ditulis sebagai mapping, bukan sequence ---

@@ -100,7 +100,7 @@ membuat `node` gagal start bila berkasnya tidak ditemukan.
 | `end_session` | Menutup sesi yang berjalan dan melepas koneksi browser/desktop. |
 | `save_scenario` | Membekukan urutan langkah yang terbukti berhasil saat eksplorasi menjadi berkas YAML Midscene yang bisa dipakai ulang. |
 | `list_scenarios` | Menampilkan daftar nama skenario yang sudah tersimpan. |
-| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — langkah yang sudah di-cache melewati model vision sepenuhnya. Tetap dipotong dari budget di muka: satu operasi AI per langkah `flow` di YAML-nya. Skenario yang lebih panjang dari budget ditolak `BUDGET_EXCEEDED` dan tidak dijalankan sama sekali. |
+| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — langkah yang sudah di-cache melewati model vision sepenuhnya. Untuk target `web`, sesi lebih dulu membuka alamat yang ditulis skenario itu sendiri (`page:` / `browser:` / `web:` / `target:`), atau alamat dari argumen `url` bila diberikan. Tetap dipotong dari budget di muka: satu operasi AI per langkah `flow` di YAML-nya. Skenario yang lebih panjang dari budget ditolak `BUDGET_EXCEEDED` dan tidak dijalankan sama sekali. |
 | `build_walkthrough` | Mengubah report Midscene menjadi halaman walkthrough berbahasa Indonesia yang berdiri sendiri. |
 
 ## Alur kerja
@@ -188,6 +188,28 @@ seluruh langkah `flow` di semua task, lalu memotong sebanyak itu di muka:
   harus berupa sequence: satu entri `- ` per langkah.
 - Hasil yang sukses melaporkan potongannya: `Charged N of LIMIT AI
   operations.`
+
+### Alamat replay
+
+Skenario harus berdiri sendiri: alamat yang dibuka ikut tersimpan di YAML-nya.
+`Agent.runYaml` memainkan flow pada agent yang **sudah** terikat ke satu halaman
+dan tidak pernah melakukan navigasi, jadi `url:` di dalam YAML tidak berarti apa-apa
+kecuali sesi yang membukanya. Karena itu `run_scenario` membaca alamat itu dari YAML
+(pada parse yang sama dengan penghitung langkah, bukan parse kedua) lalu meneruskannya
+ke `start`.
+
+- Empat kunci Midscene untuk lingkungan web — `page`, `browser`, `web`, `target` —
+  semuanya diterima. Midscene **tidak** menetapkan presedensi antar-alias:
+  `resolveWebTarget` menolak dokumen yang memakai lebih dari satu ("Only one web
+  target can be specified"), dan `parseYamlScript` sudah memanggilnya. Server ini
+  memakai fungsi Midscene itu juga, bukan daftar alias sendiri.
+- Argumen `url` pada `run_scenario` menimpa nilai YAML — untuk memutar alur yang sama
+  di staging, misalnya.
+- Target `web` tanpa alamat di mana pun ditolak `SCENARIO_NO_URL` **sebelum** browser
+  dibuka, lengkap dengan blok yang harus ditambahkan. Dulu kasus ini berjalan diam-diam
+  di halaman kosong dan setiap `aiAssert` gagal.
+- Target `computer` tidak punya alamat: `url` diabaikan dan disebutkan di hasilnya,
+  persis seperti `start_session`.
 
 Cache tidak mengurangi potongan ini. Cache memangkas **tagihan sungguhan**
 (langkah yang kena cache tidak memanggil VLM), sementara budget adalah
