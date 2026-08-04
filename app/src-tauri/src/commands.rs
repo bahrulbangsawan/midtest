@@ -36,7 +36,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, SessionId};
+use agent_client_protocol::schema::v1::{
+    CancelNotification, ContentBlock, PromptRequest, SessionId,
+};
 use agent_client_protocol::{Agent, ConnectionTo};
 use serde::Serialize;
 use serde_json::Value;
@@ -313,6 +315,62 @@ pub async fn send_prompt(state: State<'_, AppState>, text: String) -> Result<(),
     // Kunci diambil dan dilepas di sini, bukan ditahan selama giliran.
     let target = state.turn_target().await?;
     run_turn(&state.ctx, &target, text).await
+}
+
+/// Kirim `session/cancel` untuk sesi `target`.
+///
+/// **Ini notifikasi, bukan request.** Tanda tangannya
+/// `ConnectionTo::send_notification<N: JsonRpcNotification>(&self, notification: N)
+/// -> Result<(), Error>` (`agent-client-protocol-2.0.0/src/jsonrpc.rs:3480`):
+/// sinkron, tanpa `id`, dan tanpa `SentRequest`/`block_task` untuk ditunggu.
+/// Karena itu fungsi ini kembali seketika. `Ok` di sini hanya berarti
+/// "terkirim", bukan "giliran sudah berhenti".
+///
+/// Yang mengakhiri gilirannya adalah agen: skema mewajibkan `session/prompt`
+/// yang tertunda dijawab dengan [`StopReason::Cancelled`], **sebagai respons
+/// normal** — jadi [`run_turn`] menutupnya lewat cabang `Ok` dengan
+/// `RUN_FINISHED`. Mengubahnya menjadi `RUN_ERROR` akan menampilkan galat untuk
+/// sesuatu yang pengguna sendiri minta.
+///
+/// [`StopReason::Cancelled`]: agent_client_protocol::schema::v1::StopReason::Cancelled
+fn send_cancel(target: &TurnTarget) -> Result<(), String> {
+    target
+        .connection
+        .send_notification(CancelNotification::new(target.session_id.clone()))
+        .map_err(|error| format!("Permintaan berhenti gagal dikirim ke agen: {error}"))
+}
+
+/// Badan [`cancel_turn`], bebas dari `State` milik Tauri.
+///
+/// Dipisahkan dengan alasan yang sama seperti [`run_turn`]: satu-satunya cara
+/// membuktikan bahwa pembatalan **tidak** antre di kunci sesi adalah
+/// menjalankannya terhadap [`AppState`] sungguhan saat sebuah giliran sedang
+/// menggantung, dan `State<'_, AppState>` tidak bisa dibangun di test.
+///
+/// # Errors
+///
+/// Bila belum ada sesi, atau bila notifikasi gagal masuk ke transport.
+async fn cancel_turn_body(state: &AppState) -> Result<(), String> {
+    // Kunci diambil dan dilepas di sini. Pembatalan dipanggil justru saat
+    // giliran berjalan, jadi menahan kunci akan membekukan tombol berhenti
+    // tepat pada saat ia dibutuhkan.
+    let target = state.turn_target().await?;
+    send_cancel(&target)
+}
+
+/// Minta agen menghentikan giliran yang sedang berjalan.
+///
+/// Kembali begitu notifikasi terkirim; giliran berakhir belakangan, saat agen
+/// menjawab prompt yang tertunda dengan `Cancelled` dan [`run_turn`] menutupnya
+/// dengan `RUN_FINISHED`. Frontend tidak boleh menganggap giliran sudah selesai
+/// hanya karena perintah ini `Ok`.
+///
+/// # Errors
+///
+/// Bila belum ada sesi, atau bila notifikasi gagal masuk ke transport.
+#[tauri::command]
+pub async fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
+    cancel_turn_body(&state).await
 }
 
 /// Teruskan pilihan pengguna ke permintaan izin yang sedang menunggu.
@@ -906,6 +964,123 @@ mod tests {
             .expect_err("harus gagal");
 
         assert!(galat.contains("sudah mati sekarang"), "dapat: {galat}");
+    }
+
+    // ------------------------------------------------------ pembatalan giliran
+
+    /// **Notifikasi `session/cancel` benar-benar sampai ke agen, dan giliran
+    /// yang dibatalkan berakhir sebagai respons normal.**
+    ///
+    /// Dua klaim dalam satu test karena keduanya satu peristiwa: skema
+    /// menyatakan `Cancelled` **WAJIB** dikembalikan `session/prompt` yang
+    /// tertunda begitu klien mengirim `session/cancel`. Jadi bila kita
+    /// memperlakukan giliran yang dibatalkan sebagai galat, UI akan menampilkan
+    /// galat merah untuk sesuatu yang pengguna sendiri minta.
+    #[tokio::test]
+    async fn membatalkan_mengirim_session_cancel_lalu_giliran_ditutup_run_finished() {
+        let (ctx, events) = recording_context(Duration::from_secs(30));
+        let mut agen = FakeAgent::start(&ctx, events).await;
+        let target = turn_target_of(&agen);
+
+        let giliran = tokio::spawn({
+            let ctx = ctx.clone();
+            let target = target.clone();
+            async move { run_turn(&ctx, &target, "halo".into()).await }
+        });
+
+        // Agen menerima prompt dan sengaja **tidak** menjawabnya dulu.
+        let id = tunggu_prompt(&mut agen, "halo").await;
+        let (_, mulai) = agen.next_event().await;
+        assert_eq!(mulai["type"], "RUN_STARTED", "dapat: {mulai}");
+
+        send_cancel(&target).expect("notifikasi batal harus terkirim");
+
+        let baris = agen.next_line().await;
+        assert_eq!(baris["method"], "session/cancel", "dapat: {baris}");
+        assert_eq!(baris["params"]["sessionId"], "sesi-uji", "dapat: {baris}");
+        assert!(
+            baris.get("id").is_none(),
+            "session/cancel adalah notifikasi: tidak boleh ada id yang menunggu balasan: {baris}"
+        );
+
+        // Baru sekarang agen menutup prompt yang tertunda, sesuai skema.
+        agen.reply(&id, json!({ "stopReason": "cancelled" }));
+
+        let (nama, selesai) = agen.next_event().await;
+        assert_eq!(nama, EVENT_AGUI);
+        assert_eq!(
+            selesai["type"], "RUN_FINISHED",
+            "giliran yang dibatalkan berakhir normal, bukan galat: {selesai}"
+        );
+        assert_eq!(selesai["runId"], mulai["runId"]);
+        assert_eq!(selesai["threadId"], mulai["threadId"]);
+
+        tokio::time::timeout(TEST_TIMEOUT, giliran)
+            .await
+            .expect("giliran harus selesai")
+            .expect("task tidak boleh panik")
+            .expect("pembatalan bukan kegagalan giliran");
+
+        agen.shutdown().await;
+    }
+
+    /// **Pembatalan tidak boleh menunggu kunci sesi.** Ia dipanggil justru saat
+    /// giliran sedang berjalan; bila ia antre di kunci yang sama dengan yang
+    /// ditahan giliran, tombol berhenti tidak akan pernah berfungsi tepat pada
+    /// satu-satunya saat ia dibutuhkan.
+    #[tokio::test]
+    async fn membatalkan_bekerja_saat_giliran_berjalan_dan_tidak_menahan_kunci() {
+        let (ctx, events) = recording_context(Duration::from_secs(30));
+        let mut agen = FakeAgent::start(&ctx, events).await;
+        let (state, _events_state) = state_uji();
+
+        let target = turn_target_of(&agen);
+        *state.session.lock().await = Some(Session {
+            handle: agen.handle(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+            target,
+        });
+
+        let diambil = state.turn_target().await.expect("sesi harus ada");
+        let giliran = tokio::spawn({
+            let ctx = ctx.clone();
+            async move { run_turn(&ctx, &diambil, "halo".into()).await }
+        });
+
+        tunggu_prompt(&mut agen, "halo").await;
+
+        // Giliran menggantung di sini. Pembatalan tetap harus selesai cepat.
+        tokio::time::timeout(Duration::from_millis(500), cancel_turn_body(&state))
+            .await
+            .expect("pembatalan tidak boleh menunggu giliran atau kunci sesi")
+            .expect("pembatalan harus berhasil");
+
+        let baris = agen.next_line().await;
+        assert_eq!(baris["method"], "session/cancel", "dapat: {baris}");
+        assert_eq!(baris["params"]["sessionId"], "sesi-uji", "dapat: {baris}");
+
+        // Dan kuncinya memang tidak ditahan setelahnya.
+        let bebas = tokio::time::timeout(Duration::from_millis(500), state.session.lock())
+            .await
+            .expect("kunci sesi harus tetap bebas setelah pembatalan");
+        assert!(bebas.is_some());
+        drop(bebas);
+
+        giliran.abort();
+        drop(giliran.await);
+        agen.shutdown().await;
+    }
+
+    /// Menekan berhenti sebelum ada agen tersambung harus menghasilkan kalimat
+    /// yang bisa dibaca pengguna — bukan panik dan bukan `unwrap` pada `None`.
+    #[tokio::test]
+    async fn membatalkan_tanpa_sesi_menolak_dengan_kalimat_indonesia() {
+        let (state, _events) = state_uji();
+
+        let galat = cancel_turn_body(&state)
+            .await
+            .expect_err("tanpa sesi harus menolak");
+
+        assert!(galat.contains("Belum terhubung"), "dapat: {galat}");
     }
 
     /// Tanpa sesi, `turn_target` menolak dengan kalimat yang bisa dibaca

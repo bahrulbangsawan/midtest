@@ -51,6 +51,7 @@ pub fn run() {
             greet,
             commands::connect_agent,
             commands::send_prompt,
+            commands::cancel_turn,
             commands::answer_permission,
             commands::get_full_permissions,
             commands::set_full_permissions,
