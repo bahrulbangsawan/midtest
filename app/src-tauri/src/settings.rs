@@ -27,7 +27,22 @@ pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let raw = serde_json::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join(FILE_NAME), raw)
+
+    let target = dir.join(FILE_NAME);
+    let temp = dir.join(format!("{}.tmp", FILE_NAME));
+
+    // Write to temp file first to ensure atomicity
+    std::fs::write(&temp, raw)?;
+
+    // Atomic rename: reader sees either old complete file or new complete one, never torn
+    match std::fs::rename(&temp, &target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Clean up temp file on rename failure
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -77,5 +92,34 @@ mod tests {
         let d = dir_sementara().join("belum").join("ada");
         save(&d, &Settings { full_permissions: true }).unwrap();
         assert!(load(&d).full_permissions);
+    }
+
+    #[test]
+    fn berkas_kosong_jatuh_ke_default() {
+        let d = dir_sementara();
+        std::fs::write(d.join("settings.json"), "").unwrap();
+        assert!(!load(&d).full_permissions);
+    }
+
+    #[test]
+    fn json_array_bukan_objek_jatuh_ke_default() {
+        let d = dir_sementara();
+        std::fs::write(d.join("settings.json"), "[]").unwrap();
+        assert!(!load(&d).full_permissions);
+    }
+
+    #[test]
+    fn field_tipe_salah_jatuh_ke_default() {
+        let d = dir_sementara();
+        std::fs::write(d.join("settings.json"), r#"{"full_permissions": "bukan boolean"}"#).unwrap();
+        assert!(!load(&d).full_permissions);
+    }
+
+    #[test]
+    fn save_tidak_meninggalkan_berkas_tmp() {
+        let d = dir_sementara();
+        save(&d, &Settings { full_permissions: true }).unwrap();
+        let tmp_path = d.join("settings.json.tmp");
+        assert!(!tmp_path.exists(), "Temp file should not be left behind after successful save");
     }
 }
