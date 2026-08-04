@@ -1,4 +1,4 @@
-use app_lib::acp::{AcpError, InitializeResponseExt};
+use app_lib::acp::{AcpError, ClientContext, InitializeResponseExt};
 use app_lib::agents::AgentSpec;
 use std::path::Path;
 use std::time::Duration;
@@ -8,7 +8,7 @@ async fn initialize_mengembalikan_info_agen_dan_kapabilitas() {
     let spec = app_lib::agents::find_agent("claude").expect("agen claude harus ada");
     // ACP mewajibkan cwd sesi berupa path absolut.
     let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let (handle, init) = app_lib::acp::connect(spec, cwd)
+    let (handle, init) = app_lib::acp::connect(spec, cwd, ClientContext::diam())
         .await
         .expect("connect harus berhasil");
 
@@ -46,7 +46,12 @@ async fn connect_menyerah_bila_adapter_tak_pernah_menjawab() {
 
     let mulai = std::time::Instant::now();
     let hasil =
-        app_lib::acp::connect_with_timeout(&diam, Path::new(env!("CARGO_MANIFEST_DIR")), anggaran)
+        app_lib::acp::connect_with_timeout(
+            &diam,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            ClientContext::diam(),
+            anggaran,
+        )
             .await;
     let berlalu = mulai.elapsed();
 
@@ -66,7 +71,7 @@ async fn connect_menolak_cwd_yang_tidak_ada() {
     let spec = app_lib::agents::find_agent("claude").expect("agen claude harus ada");
     let hilang = Path::new("/jalur/yang/pasti/tidak/ada/midscene-desktop");
 
-    match app_lib::acp::connect(spec, hilang).await {
+    match app_lib::acp::connect(spec, hilang, ClientContext::diam()).await {
         Err(AcpError::InvalidCwd { path, .. }) => assert_eq!(path, hilang),
         other => panic!("harusnya InvalidCwd, dapat {other:?}"),
     }

@@ -16,6 +16,10 @@ pub mod client;
 pub mod events;
 pub mod session;
 
+pub use client::{
+    ClientContext, DEFAULT_PERMISSION_TIMEOUT, EVENT_AGENT_DISCONNECTED, EVENT_AGUI,
+    EVENT_PERMISSION_REQUEST, EventSink, PermissionError, PermissionMap,
+};
 pub use events::to_agui;
 pub use session::{DEFAULT_SESSION_TIMEOUT, new_session, new_session_with_timeout};
 
@@ -242,8 +246,9 @@ fn resolve_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
 pub async fn connect(
     spec: &AgentSpec,
     cwd: &Path,
+    ctx: ClientContext,
 ) -> Result<(AcpHandle, InitializeResponse), AcpError> {
-    connect_with_timeout(spec, cwd, DEFAULT_HANDSHAKE_TIMEOUT).await
+    connect_with_timeout(spec, cwd, ctx, DEFAULT_HANDSHAKE_TIMEOUT).await
 }
 
 /// Seperti [`connect`], tetapi dengan batas waktu handshake yang ditentukan
@@ -253,6 +258,12 @@ pub async fn connect(
 /// `cwd` tidak dipakai untuk men-spawn proses (lihat [`AcpHandle::cwd`]); ia
 /// dijadikan absolut lalu disimpan untuk `session/new` pada task berikutnya.
 ///
+/// `ctx` adalah state bersama peran klien: ke mana event AG-UI diemisikan, peta
+/// permintaan izin yang menunggu, dan pasangan `runId`/`threadId` yang berlaku.
+/// Ia diminta di sini — bukan dipasang belakangan — karena handler notifikasi
+/// dan handler izin sudah harus terpasang sejak baris pertama yang dibaca dari
+/// adapter: agen boleh mengirim `session/update` sebelum `initialize` dijawab.
+///
 /// # Errors
 ///
 /// Mengembalikan [`AcpError`] bila `cwd` tidak sah, proses gagal dijalankan,
@@ -261,6 +272,7 @@ pub async fn connect(
 pub async fn connect_with_timeout(
     spec: &AgentSpec,
     cwd: &Path,
+    ctx: ClientContext,
     handshake_timeout: Duration,
 ) -> Result<(AcpHandle, InitializeResponse), AcpError> {
     let cwd = resolve_cwd(cwd)?;
@@ -271,7 +283,7 @@ pub async fn connect_with_timeout(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let runner = tokio::spawn(async move {
-        client::builder()
+        client::builder(ctx)
             .connect_with(agent, async move |cx: ConnectionTo<Agent>| {
                 let request = InitializeRequest::new(ProtocolVersion::V1)
                     .client_capabilities(ClientCapabilities::default())
