@@ -25,7 +25,7 @@ use std::path::Path;
 use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
 
 /// Nama server MCP ini di mata agen; jadi prefiks nama tool (`midscene__*`).
-const NAMA: &str = "midscene";
+const SERVER_NAME: &str = "midscene";
 
 /// Build the stdio MCP entry for the Midscene sidecar.
 ///
@@ -43,7 +43,7 @@ pub fn midscene_server(root: &Path) -> McpServer {
     let entry = root.join("midscene-mcp/src/index.ts");
 
     McpServer::Stdio(
-        McpServerStdio::new(NAMA, "node")
+        McpServerStdio::new(SERVER_NAME, "node")
             .args(vec![
                 format!("--env-file={}", env_file.display()),
                 entry.display().to_string(),

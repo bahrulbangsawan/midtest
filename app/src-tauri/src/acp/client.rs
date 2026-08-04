@@ -187,11 +187,36 @@ impl std::error::Error for PermissionError {}
 
 /// Peta permintaan izin yang sedang menunggu jawaban webview.
 ///
-/// Satu entri hidup dari saat agen meminta izin sampai salah satu dari tiga hal
-/// terjadi: pengguna menjawab, batas waktu lewat, atau agen membatalkan. Ketiga
-/// jalur itu **wajib** membuang entrinya — peta yang bocor berarti setiap
-/// dialog izin sepanjang umur aplikasi tetap tersimpan, dan id yang sudah mati
+/// Satu entri hidup dari saat agen meminta izin sampai salah satu dari empat hal
+/// terjadi: pengguna menjawab ([`Self::jawab`]), batas waktu lewat, agen
+/// membatalkan, atau `ConnectionTo::spawn` menolak menjalankan task-nya.
+/// Keempat jalur itu **wajib** membuang entrinya — peta yang bocor berarti
+/// dialog izin lama menumpuk sepanjang umur aplikasi, dan id yang sudah mati
 /// tetap tampak hidup bagi `answer_permission`.
+///
+/// # Jalur kelima yang memang membocorkan entri (diketahui, sengaja dibiarkan)
+///
+/// Bila koneksi mati **saat gerbang izin masih menunggu**, task yang dijalankan
+/// `ConnectionTo::spawn` ikut mati bersama koneksinya. `tokio::time::timeout`
+/// di dalamnya tidak pernah selesai, jadi [`Self::discard`] tidak pernah
+/// dipanggil dan entrinya tertinggal. Entri itu juga bertahan melewati sambung
+/// ulang, karena `ClientContext` hidup di `AppState` dan bukan milik satu
+/// koneksi.
+///
+/// Dinilai bisa diterima, bukan diperbaiki, karena kerusakannya berhenti di
+/// memori:
+///
+/// * id izin berasal dari penghitung monoton, jadi entri basi tidak akan pernah
+///   bertabrakan dengan permintaan baru dan tidak bisa "menjawab" permintaan
+///   lain;
+/// * `answer_permission` atas entri basi mengembalikan
+///   [`PermissionError::WaiterGone`] — berisik, bukan diam-diam menyetujui;
+/// * sisi protokolnya tetap tuntas: `ResponderDropGuard` milik crate menjawab
+///   agen saat `Responder`-nya ikut ter-drop.
+///
+/// Yang tersisa hanyalah satu entri `HashMap` per permintaan izin yang
+/// tertinggal. Menutupnya butuh pengait siklus hidup koneksi ke dalam peta, dan
+/// itu bukan pertukaran yang sepadan di task ini.
 #[derive(Clone, Default)]
 pub struct PermissionMap {
     waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -517,16 +542,16 @@ fn permission_gate(
         }),
     );
 
-    let batas = ctx.permission_timeout();
+    let budget = ctx.permission_timeout();
     let permissions = ctx.permissions().clone();
     let cancellation = responder.cancellation();
-    let id_task = request_id.clone();
+    let task_request_id = request_id.clone();
 
-    let hasil_spawn = cx.spawn(async move {
-        let keputusan = tokio::select! {
+    let spawned = cx.spawn(async move {
+        let decision = tokio::select! {
             biased;
             () = cancellation.cancelled() => Decision::Cancelled,
-            hasil = tokio::time::timeout(batas, rx) => match hasil {
+            answered = tokio::time::timeout(budget, rx) => match answered {
                 Ok(Ok(option_id)) => Decision::Selected(option_id),
                 // Penunggunya dibuang, atau batas waktu lewat tanpa jawaban.
                 // Keduanya berarti tidak ada persetujuan manusia, dan tidak ada
@@ -537,9 +562,9 @@ fn permission_gate(
 
         // Wajib, di semua jalur: entri yang tertinggal membuat id mati tampak
         // hidup bagi `answer_permission`.
-        permissions.discard(&id_task);
+        permissions.discard(&task_request_id);
 
-        match keputusan {
+        match decision {
             Decision::Selected(option_id) => responder.respond(select_option(&request, &option_id)),
             Decision::Refused => responder.respond(refuse(&request)),
             Decision::Cancelled => {
@@ -548,7 +573,7 @@ fn permission_gate(
         }
     });
 
-    if let Err(error) = hasil_spawn {
+    if let Err(error) = spawned {
         // Task-nya tidak jadi jalan, jadi `responder` dan `rx` sudah ikut
         // ter-drop bersama closure-nya. Yang masih bisa (dan wajib) dibersihkan
         // adalah entri petanya.

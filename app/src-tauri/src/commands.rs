@@ -74,12 +74,12 @@ impl EventSink for TauriSink {
 /// tidak punya hubungan itu lagi, karena itu [`ENV_ROOT`] selalu menang bila
 /// diset. Task 8/9 boleh menggantinya dengan pemilih direktori sungguhan.
 fn repo_root() -> PathBuf {
-    let mentah = std::env::var_os(ENV_ROOT).map_or_else(
+    let raw = std::env::var_os(ENV_ROOT).map_or_else(
         || Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
         PathBuf::from,
     );
 
-    mentah.canonicalize().unwrap_or(mentah)
+    raw.canonicalize().unwrap_or(raw)
 }
 
 /// Terjemahkan kegagalan ACP menjadi kalimat yang berguna bagi pengguna.
@@ -89,20 +89,20 @@ fn repo_root() -> PathBuf {
 /// diam-diam jatuh ke lengan `_` yang berbunyi "terjadi kesalahan".
 fn user_message(error: &AcpError) -> String {
     match error {
-        AcpError::Protocol(sumber) => {
-            format!("Agen menolak permintaan protokol: {sumber}")
+        AcpError::Protocol(source) => {
+            format!("Agen menolak permintaan protokol: {source}")
         }
         AcpError::ConnectionClosed(detail) => {
             format!("Koneksi ke agen terputus sebelum siap: {detail}")
         }
-        AcpError::HandshakeTimeout(anggaran) => format!(
+        AcpError::HandshakeTimeout(budget) => format!(
             "Adapter agen tidak menjawab dalam {} detik. Periksa pemasangan adapternya.",
-            anggaran.as_secs()
+            budget.as_secs()
         ),
-        AcpError::SessionTimeout(anggaran) => format!(
+        AcpError::SessionTimeout(budget) => format!(
             "Agen tidak berhasil membuka sesi dalam {} detik. \
              Periksa sidecar Midscene, `node`, dan berkas `.env`.",
-            anggaran.as_secs()
+            budget.as_secs()
         ),
         AcpError::InvalidCwd { path, source } => format!(
             "Direktori kerja {} tidak bisa dipakai: {source}",
@@ -215,9 +215,9 @@ pub async fn connect_agent(
     let spec: &'static AgentSpec =
         find_agent(&agent_id).ok_or_else(|| format!("Agen \"{agent_id}\" tidak dikenal."))?;
 
-    let mut terkunci = state.session.lock().await;
-    if let Some(lama) = terkunci.take() {
-        state.close(lama.handle).await;
+    let mut guard = state.session.lock().await;
+    if let Some(previous) = guard.take() {
+        state.close(previous.handle).await;
     }
 
     let root = state.root.clone();
@@ -252,7 +252,7 @@ pub async fn connect_agent(
         connection: handle.connection().clone(),
         session_id,
     };
-    *terkunci = Some(Session { handle, target });
+    *guard = Some(Session { handle, target });
 
     // Paling akhir: sejak titik ini putusnya koneksi memang kabar buruk yang
     // hanya bisa disampaikan lewat event.
@@ -295,9 +295,9 @@ async fn run_turn(ctx: &ClientContext, target: &TurnTarget, text: String) -> Res
             Ok(())
         }
         Err(error) => {
-            let pesan = format!("Giliran gagal diselesaikan: {error}");
-            ctx.emit(EVENT_AGUI, agui_run_error(&run_id, &thread_id, &pesan));
-            Err(pesan)
+            let message = format!("Giliran gagal diselesaikan: {error}");
+            ctx.emit(EVENT_AGUI, agui_run_error(&run_id, &thread_id, &message));
+            Err(message)
         }
     }
 }
