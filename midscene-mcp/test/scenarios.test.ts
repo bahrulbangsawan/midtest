@@ -158,6 +158,79 @@ test('hitungLangkahSkenario melempar INTERNAL untuk YAML yang tidak bisa diurai'
   }
 });
 
+// --- runGherkinScenario: biayanya tidak bisa dibatasi, jadi ditolak ---
+
+/**
+ * Dua YAML yang identik kecuali satu kunci. Yang satu memakai
+ * `runGherkinScenario`, yang lain `ai` — struktur, jumlah langkah, dan nama task
+ * persis sama. Kalau tes penolakan lulus tapi tes pasangannya juga ikut ditolak,
+ * berarti penjaganya terlalu rakus, bukan tepat sasaran.
+ */
+const YAML_GHERKIN =
+  'tasks:\n  - name: alur\n    flow:\n      - ai: buka halaman\n      - runGherkinScenario: |\n          Given saya di beranda\n          When saya klik masuk\n          Then saya lihat dasbor\n';
+const YAML_TANPA_GHERKIN =
+  'tasks:\n  - name: alur\n    flow:\n      - ai: buka halaman\n      - ai: |\n          klik masuk lalu pastikan dasbor tampil\n';
+
+test('hitungLangkahSkenario menolak runGherkinScenario, bukan menagihnya satu langkah', () => {
+  let galat: ToolError | undefined;
+  try {
+    hitungLangkahSkenario(YAML_GHERKIN);
+  } catch (err) {
+    galat = err as ToolError;
+  }
+  assert.ok(galat, 'harus melempar, bukan mengembalikan hitungan');
+  assert.equal(galat.code, 'SCENARIO_UNSUPPORTED');
+  // Pesannya harus bisa ditindaklanjuti agen: kenapa ditolak dan harus menulis apa.
+  assert.match(galat.message, /task 1, step 2/, 'sebutkan langkah mana yang bermasalah');
+  assert.match(galat.message, /unbounded number of AI operations/);
+  assert.match(galat.message, /caching disabled/);
+  assert.match(galat.message, /aiAssert/, 'sebutkan bentuk pengganti yang benar');
+});
+
+test('skenario yang sama tanpa runGherkinScenario tetap lolos dan dihitung normal', () => {
+  assert.equal(hitungLangkahSkenario(YAML_TANPA_GHERKIN), 2);
+});
+
+test('runGherkinScenario dengan nilai kosong tetap ditolak', () => {
+  // Midscene bercabang pada `'runGherkinScenario' in flowItem` — keberadaan kunci,
+  // bukan kebenaran nilainya. Penjaga ini harus mencocokkan perilaku itu persis.
+  assert.throws(
+    () => hitungLangkahSkenario('tasks:\n  - name: a\n    flow:\n      - runGherkinScenario:\n'),
+    (err: ToolError) => err.code === 'SCENARIO_UNSUPPORTED',
+  );
+});
+
+test('SCENARIO_UNSUPPORTED tidak ditandai retryable', () => {
+  const galat = new ToolError('SCENARIO_UNSUPPORTED', 'apa saja');
+  assert.equal(galat.retryable, false, 'mengulang YAML yang sama akan gagal identik');
+});
+
+test('run_scenario menolak runGherkinScenario tanpa pernah membuka sesi', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore();
+  await store.save('gherkin', YAML_GHERKIN);
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'gherkin', target: 'web' },
+  });
+  assert.equal(hasil.isError, true);
+  const teks = (hasil.content as any)[0].text;
+  assert.match(teks, /SCENARIO_UNSUPPORTED/);
+  assert.match(teks, /Do not retry/, 'kode non-retryable harus menghasilkan saran itu');
+  assert.equal(dibuat.length, 0, 'tidak boleh ada browser atau desktop yang dibuka');
+});
+
+test('run_scenario menjalankan skenario pasangannya yang tanpa gherkin', async () => {
+  const { client, store, dibuat } = await hubungkanDenganStore({ limit: 10 });
+  await store.save('tanpa-gherkin', YAML_TANPA_GHERKIN);
+  const hasil = await client.callTool({
+    name: 'run_scenario',
+    arguments: { name: 'tanpa-gherkin', target: 'web' },
+  });
+  assert.notEqual(hasil.isError, true);
+  assert.match((hasil.content as any)[0].text, /Charged 2 of 10 AI operations\./);
+  assert.equal(dibuat.length, 1);
+});
+
 test('run_scenario memotong budget sebanyak langkah skenario', async () => {
   const { client, store } = await hubungkanDenganStore({ limit: 10 });
   await store.save('checkout', yamlDenganLangkah(3));

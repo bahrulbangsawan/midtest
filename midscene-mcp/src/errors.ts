@@ -4,9 +4,16 @@ export type ToolErrorCode =
   | 'BUDGET_EXCEEDED'
   | 'DEVICE_FAILED'
   | 'SCENARIO_NOT_FOUND'
+  // The scenario is well-formed but contains a construct the cost guard refuses to run.
+  // Distinct from INTERNAL (nothing broke) and from BUDGET_EXCEEDED (raising the budget
+  // would not help) — the agent must rewrite the YAML, and the message says how.
+  | 'SCENARIO_UNSUPPORTED'
   | 'REPORT_MISSING'
   | 'INTERNAL';
 
+// Deliberately only DEVICE_FAILED. SCENARIO_UNSUPPORTED in particular must stay out:
+// replaying the identical YAML fails identically every time, so inviting a retry would
+// burn a turn to reach the same refusal.
 const RETRYABLE: ReadonlySet<ToolErrorCode> = new Set<ToolErrorCode>([
   'DEVICE_FAILED',
 ]);

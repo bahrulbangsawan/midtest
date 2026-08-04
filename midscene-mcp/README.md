@@ -167,6 +167,17 @@ seluruh langkah `flow` di semua task, lalu memotong sebanyak itu di muka:
 - Skenario yang YAML-nya tidak bisa diurai ditolak (`INTERNAL`), bukan
   diloloskan tanpa batas. Kalau biayanya tidak bisa dihitung, ia tidak
   dijalankan.
+- Langkah `runGherkinScenario` ditolak (`SCENARIO_UNSUPPORTED`), juga
+  sebelum sesi dibuka. Satu langkah itu mengembang jadi sejumlah operasi AI
+  yang tidak terbatas saat runtime — tidak ada batas langkah di
+  `run-gherkin-scenario.mjs` — jadi menghitungnya sebagai satu langkah
+  membuat skenario bisa membayar berapa pun dengan plafon satu. Lebih buruk
+  lagi, `yaml/player.mjs` menjalankannya dengan `cacheable: false`, jadi
+  cache Midscene tidak pernah berlaku dan setiap replay membayar VLM penuh —
+  ini merusak premis "replay nyaris gratis", bukan cuma plafon budget.
+  Tulis alurnya sebagai langkah eksplisit (`ai`, `aiAssert`, `aiWaitFor`)
+  seperti yang memang dihasilkan tool eksplorasi; masing-masing dihitung,
+  ditagih, dan kena cache.
 - Hasil yang sukses melaporkan potongannya: `Charged N of LIMIT AI
   operations.`
 

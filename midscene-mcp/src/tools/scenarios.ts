@@ -14,7 +14,7 @@ export function registerScenarioTools(
     'save_scenario',
     {
       description:
-        'Freeze a sequence of steps that worked during exploration into a reusable Midscene YAML scenario. Run this once the flow is proven.',
+        'Freeze a sequence of steps that worked during exploration into a reusable Midscene YAML scenario. Run this once the flow is proven. Write the flow as explicit steps (ai, aiAssert, aiWaitFor, ...), one per action — that is what run_scenario can count and charge, and what the Midscene cache can make cheap on replay. Do not use runGherkinScenario: run_scenario refuses it with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run and Midscene disables caching for it.',
       inputSchema: {
         name: z.string().describe('Letters, digits, hyphen and underscore only'),
         yaml: z.string().describe('Midscene YAML flow'),
@@ -51,7 +51,7 @@ export function registerScenarioTools(
     'run_scenario',
     {
       description:
-        'Replay a saved scenario end to end with the Midscene cache enabled. Cached steps skip the vision model entirely, but a replay is still charged against the session budget up front: one AI operation per flow step in the scenario YAML. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs. Use this for regression runs.',
+        'Replay a saved scenario end to end with the Midscene cache enabled. Cached steps skip the vision model entirely, but a replay is still charged against the session budget up front: one AI operation per flow step in the scenario YAML. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs, and one containing runGherkinScenario is refused with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run. Use this for regression runs.',
       inputSchema: {
         name: z.string(),
         target: z.enum(['web', 'computer']),
