@@ -8,6 +8,9 @@ node_modules/
 # Keluaran Midscene: report berisi screenshot layar, cache bersifat lokal
 midscene_run/
 
+# Skenario tersimpan bersifat lokal per proyek yang diuji
+scenarios/
+
 # Build Tauri
 src-tauri/target/
 dist/
