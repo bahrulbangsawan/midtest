@@ -98,20 +98,33 @@ pilihan eksplisit, Claude tidak.
 | `sessionCapabilities.fork` | tidak | ya |
 | `resume`/`list`/`close`/`delete` | ya | ya |
 
-**ATURAN WAJIB UNTUK KLIEN RUST — berlaku di kedua adapter.**
-Untuk server MCP stdio, **hilangkan field `type`**. Itu satu-satunya bentuk yang
-diterima keduanya, dan keduanya **membuang entri yang tidak cocok tanpa error**:
+**Bentuk stdio untuk klien Rust — dikoreksi setelah uji nyata.**
 
-- Claude: cabang `else if (!("type" in server))` di `dist/acp-agent.js` — mengirim
-  `type: "stdio"` eksplisit membuat entri tidak cocok cabang mana pun.
-- Codex: `zMcpServer` adalah union di mana varian stdio **tidak** punya literal `type`,
-  dan field-nya divalidasi dengan `vecSkipError` — entri yang gagal divalidasi dilewati
-  diam-diam.
+Bentuk kanoniknya adalah **tanpa field `type`**: di kedua skema, varian stdio memang
+varian yang tidak punya literal `type`. Pakai bentuk itu.
 
-Konsekuensinya sama di kedua sisi: `session/new` tetap sukses, agen berjalan tanpa satu
-pun tool Midscene, dan tidak ada yang melapor. **Rencana 2 wajib punya test integrasi
-yang menegaskan tool Midscene benar-benar muncul di sesi** — jangan pernah menyimpulkan
-dari `session/new` yang tidak error.
+Koreksi atas versi awal dokumen ini: saya sempat menyatakan bahwa mengirim
+`type: "stdio"` eksplisit akan membuat server MCP **dibuang diam-diam**, berdasarkan
+cabang `else if (!("type" in server))` di `dist/acp-agent.js`. **Itu terbukti salah.**
+Diuji langsung terhadap `claude-agent-acp` 0.64.2 dengan nama server unik, dua kali —
+tanpa `type` dan dengan `type: "stdio"` — dan **kedua-duanya menghasilkan 10/10 tool
+terlihat oleh agen**. Ada lapisan validasi yang membuang field itu sebelum mencapai
+pemetaan. Pembacaan kode saya tidak lengkap; hasil empiris yang berlaku.
+
+Sisi `codex-acp` belum diuji dengan cara ini karena butuh login. Skemanya
+(`zMcpServer` union + `vecSkipError`) secara struktur memang membuang entri yang gagal
+divalidasi, jadi tetap **pakai bentuk tanpa `type`** sampai ada bukti sebaliknya.
+
+**Yang tetap wajib, dengan alasan yang berdiri sendiri:** Rencana 2 harus punya test
+integrasi yang menegaskan tool Midscene benar-benar muncul di sesi. `session/new` yang
+sukses tidak membuktikan server terpasang — dan konfigurasi MCP bisa salah karena banyak
+sebab lain di luar soal `type`.
+
+**Temuan tambahan dari uji nyata.** Sesi ACP mewarisi server MCP milik pengguna dari
+konfigurasi Claude Code-nya, digabung dengan yang dikirim klien
+(`mcpServers: { ...userProvidedOptions.mcpServers, ...mcpServers }` di `acp-agent.js`).
+Pada mesin uji, agen melihat `pencil` dan `mobbin` milik pengguna di samping server kita.
+Aplikasi **tidak boleh berasumsi hanya tool-nya sendiri yang tersedia di sesi.**
 
 Skema stdio Codex juga menuntut `args` dan `env` sebagai array **wajib**, bukan opsional.
 Kirim array kosong, jangan hilangkan field-nya.
