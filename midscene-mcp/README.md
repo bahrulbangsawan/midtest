@@ -234,19 +234,33 @@ tidak ada jalur konstruksi yang bisa membuat sesi berjalan tanpa batas.
 Ketika budget habis, `spend()` melempar galat `BUDGET_EXCEEDED` dan sesi
 harus ditutup dengan `end_session` sebelum sesi baru dibuka.
 
-## Keterbatasan dependensi yang diketahui
+## Dependensi dan npm workspaces
 
-Saat ini `@midscene/web` dan `puppeteer` hanya ter-resolve lewat hoisting
-dari `node_modules` di root repo, bukan dari `midscene-mcp/node_modules`
-sendiri. Akibatnya `npm ls` yang dijalankan di dalam `midscene-mcp/`
-melaporkan `UNMET DEPENDENCY` untuk keduanya walau di runtime keduanya
-tetap ter-resolve dengan benar via hoisting. Ini **bukan berarti paket ini
-terpasang bersih secara standalone** — install-nya masih bergantung pada
-`npm install` yang dijalankan di root repo. Konversi ke npm workspaces
-sudah direncanakan untuk membereskan ini — pending semata karena root repo
-punya perubahan uncommitted (`package.json`, `package-lock.json`, dan lain-
-lain) yang harus landing dulu sebelum konversi itu bisa dikerjakan tanpa
-menabrak pekerjaan yang belum di-commit.
+Paket ini adalah anggota npm workspace dari repo induknya. Jalankan
+`npm install` **di root repo**, bukan di direktori ini:
+
+```bash
+cd ..          # akar repo
+npm install
+npm ls -w midscene-mcp    # memeriksa dependensi paket ini
+```
+
+Menjalankan `npm ls` dari dalam `midscene-mcp/` akan melaporkan
+`UNMET DEPENDENCY` secara keliru, karena npm memperlakukannya sebagai proyek
+berdiri sendiri alih-alih anggota workspace. Pakai `-w` dari root.
+
+Satu lock tunggal ada di root. Konfigurasi ini yang membuat pin versi di
+`package.json` paket ini benar-benar ditegakkan: bila suatu dependensi bentrok
+dengan versi milik paket lain di repo, npm menyarangkannya di
+`midscene-mcp/node_modules` alih-alih diam-diam memberikan versi milik paket
+tetangga. `zod` saat ini persis begitu — versi 4 dipakai paket ini dan MCP SDK,
+sementara `@midscene/*` memakai versi 3 yang tersarang di bawahnya.
+
+Karena dependensi bisa ter-*hoist* ke root, **jangan pernah menulis jalur
+`node_modules` secara literal** — beberapa test sengaja membaca berkas internal
+Midscene, dan semuanya melewati `test/lokasi-paket.ts` yang me-resolve lewat
+Node. Jalur literal akan pecah saat hoisting berubah, atau lebih buruk, diam-diam
+memeriksa salinan yang berbeda dari yang benar-benar dimuat kode produksi.
 
 ## Menjalankan tes
 

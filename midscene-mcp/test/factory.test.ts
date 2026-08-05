@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { akarMidsceneCore } from './lokasi-paket.ts';
 import {
   ambilKelasAdapter,
   pilihKelasDevice,
@@ -69,7 +70,7 @@ test('opsiCache menghasilkan konfigurasi yang benar-benar membangun TaskCache', 
   // ketahuan saat konstruktor Agent sungguhan meledak — yaitu saat browser sudah
   // diluncurkan dan pengguna sudah menunggu.
   const jalurCacheConfig = pathToFileURL(
-    join(import.meta.dirname, '..', 'node_modules', '@midscene', 'core', 'dist', 'es', 'agent', 'cache-config.mjs'),
+    join(akarMidsceneCore(), 'dist', 'es', 'agent', 'cache-config.mjs'),
   ).href;
   const { validateAgentCacheInput } = (await import(jalurCacheConfig)) as {
     validateAgentCacheInput: (cache: unknown) => void;

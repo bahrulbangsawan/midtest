@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { akarMidsceneCore } from './lokasi-paket.ts';
 import { ScenarioStore, analisaSkenario, hitungLangkahSkenario } from '../src/scenarios.ts';
 import { ToolError } from '../src/errors.ts';
 import type { StartOpts } from '../src/session.ts';
@@ -521,9 +522,7 @@ test('flow sequence yang setara tetap lolos dan dihitung seperti sebelumnya', ()
  */
 test('KANARI: cabang dispatch playFlowItem masih sama seperti saat penjaga ini ditulis', async () => {
   const { readFile } = await import('node:fs/promises');
-  const player = join(
-    import.meta.dirname, '..', 'node_modules', '@midscene', 'core', 'dist', 'es', 'yaml', 'player.mjs',
-  );
+  const player = join(akarMidsceneCore(), 'dist', 'es', 'yaml', 'player.mjs');
   const sumber = await readFile(player, 'utf8');
 
   // Kutipnya bisa tunggal ATAU ganda — `"javascript" in flowItem` memakai kutip ganda,
