@@ -14,7 +14,8 @@
   "type": "module",
   "dependencies": {
     "@midscene/computer": "^1.10.8",
-    "@midscene/computer-playground": "^1.10.8"
+    "@midscene/computer-playground": "^1.10.8",
+    "@midscene/web": "^1.10.8"
   },
   "allowScripts": {
     "node-mac-permissions@2.5.0": true,

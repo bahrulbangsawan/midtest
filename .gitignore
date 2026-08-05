@@ -20,3 +20,6 @@ app/dist/
 app/src-tauri/target/
 
 .DS_Store
+
+# Scratch perencanaan agen
+.superpowers/
