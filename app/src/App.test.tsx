@@ -41,6 +41,26 @@ const tauri = vi.hoisted(() => {
     izinPenuhAwal: false,
     /** Perintah `set_full_permissions` yang belum dijawab. */
     setFullPermissions: undefined as Tertunda | undefined,
+    /**
+     * Jadi `true` begitu `set_full_permissions` pernah dipanggil sekali.
+     * Dipakai untuk membedakan panggilan `get_full_permissions` "saat mount"
+     * dari panggilan "pembacaan ulang setelah galat" — dua fase yang finding
+     * tinjauan pra-gabung minta diuji terpisah (skenario a vs skenario b).
+     */
+    setFullPermissionsDipanggil: false,
+    /**
+     * Bila terisi, SETIAP panggilan `get_full_permissions` sebelum
+     * `set_full_permissions` pernah dipanggil akan ditolak dengan nilai ini
+     * (skenario a: pembacaan mount gagal di lapisan IPC).
+     */
+    tolakGetFullPermissionsSaatMount: undefined as unknown,
+    /**
+     * Bila terisi, SETIAP panggilan `get_full_permissions` setelah
+     * `set_full_permissions` pernah dipanggil akan ditolak dengan nilai ini
+     * (skenario b: pembacaan ulang setelah `set_full_permissions` menolak
+     * juga gagal di lapisan IPC).
+     */
+    tolakGetFullPermissionsSetelahSet: undefined as unknown,
   };
 });
 
@@ -73,6 +93,9 @@ beforeEach(() => {
 
   tauri.izinPenuhAwal = false;
   tauri.setFullPermissions = undefined;
+  tauri.setFullPermissionsDipanggil = false;
+  tauri.tolakGetFullPermissionsSaatMount = undefined;
+  tauri.tolakGetFullPermissionsSetelahSet = undefined;
 
   tauri.invoke.mockImplementation((cmd: string) => {
     if (cmd === 'connect_agent') {
@@ -85,6 +108,16 @@ beforeEach(() => {
       });
     }
     if (cmd === 'get_full_permissions') {
+      // Fase "sebelum set_full_permissions pernah dipanggil" (mount) dan fase
+      // "sesudahnya" (pembacaan ulang setelah galat) sengaja diberi jalur
+      // penolakan terpisah — lihat komentar pada dua field `tolak...` di atas.
+      if (!tauri.setFullPermissionsDipanggil) {
+        if (tauri.tolakGetFullPermissionsSaatMount !== undefined) {
+          return Promise.reject(tauri.tolakGetFullPermissionsSaatMount);
+        }
+      } else if (tauri.tolakGetFullPermissionsSetelahSet !== undefined) {
+        return Promise.reject(tauri.tolakGetFullPermissionsSetelahSet);
+      }
       // Dibaca dari `tauri.izinPenuhAwal` di setiap panggilan (bukan
       // dipatok saat mock didaftarkan), supaya test bisa mengganti nilainya
       // di antara panggilan pertama (mount) dan panggilan kedua (pembacaan
@@ -92,6 +125,7 @@ beforeEach(() => {
       return Promise.resolve(tauri.izinPenuhAwal);
     }
     if (cmd === 'set_full_permissions') {
+      tauri.setFullPermissionsDipanggil = true;
       return new Promise((resolve, reject) => {
         tauri.setFullPermissions = { resolve, reject };
       });
@@ -363,4 +397,97 @@ test('set_full_permissions menolak: UI mengikuti pembacaan ulang get_full_permis
     (p) => p[0] === 'get_full_permissions',
   );
   expect(panggilanBaca.length).toBeGreaterThanOrEqual(2);
+});
+
+/**
+ * Skenario (a) dari temuan tinjauan pra-gabung: `get_full_permissions` gagal
+ * di lapisan IPC begitu jendela dibuka (bukan `Err` dari Rust — perintahnya
+ * sendiri tidak sempat berjalan). Berkas pengaturan di disk boleh jadi
+ * menyimpan `full_permissions: true`, jadi Rust boleh jadi sungguh sedang
+ * menyetujui semua permintaan izin secara otomatis. UI wajib menampilkan
+ * "tidak diketahui" — satu-satunya keadaan yang jujur di sini — dan bukan
+ * diam-diam berperilaku seolah mode itu mati.
+ */
+test('get_full_permissions gagal saat mount: UI menampilkan keadaan tidak diketahui, bukan diam-diam "mati"', async () => {
+  tauri.tolakGetFullPermissionsSaatMount = 'transport IPC terputus sebelum perintah berjalan';
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  const toggle = await screen.findByRole('switch', { name: 'Izin penuh' });
+  await waitFor(() => {
+    // Bukan "false" (itulah persis bug yang ditemukan tinjauan): nilai
+    // ketiga yang programatis berbeda dari "mati" maupun "nyala".
+    expect(toggle.getAttribute('aria-checked')).toBe('mixed');
+  });
+
+  // Terlihat tanpa membuka menu apa pun, dalam Bahasa Indonesia. Pil di
+  // header (`role="alert"`) adalah penanda global yang butir 4 (Task 8)
+  // minta selalu tampak — keterangan di dekat toggle mengulanginya, jadi
+  // dua elemen cocok dengan pola ini; tegaskan setidaknya satu yang muncul
+  // di dalam sebuah `role="alert"`.
+  expect(screen.getAllByText(/tidak diketahui/i).length).toBeGreaterThanOrEqual(1);
+  expect(screen.getByRole('alert').textContent).toMatch(/tidak diketahui/i);
+
+  // Togglenya sendiri dimatikan: "kebalikan dari tidak diketahui" tidak
+  // punya arti untuk dikirim ke Rust (lihat komentar `ubahIzinPenuh`/JSX).
+  expect(toggle.hasAttribute('disabled')).toBe(true);
+});
+
+/**
+ * Skenario (b) dari temuan tinjauan pra-gabung: pengguna menekan toggle,
+ * `set_full_permissions` gagal, DAN pembacaan ulang `get_full_permissions`
+ * yang harusnya jadi sumber kebenaran ikut gagal di lapisan IPC. Kontrak
+ * "flag memori Rust sudah berubah tanpa syarat" hanya berlaku untuk `Err`
+ * yang sungguh datang dari `set_full_permissions` berjalan — begitu
+ * pembacaan ulang pun gagal di transport, tidak ada lagi dasar untuk
+ * mengklaim keadaan apa pun. UI wajib mengaku tidak tahu, bukan mengklaim
+ * "mati".
+ */
+test('set_full_permissions dan pembacaan ulang get_full_permissions berdua gagal: UI tidak mengklaim mode mati', async () => {
+  tauri.izinPenuhAwal = false;
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  const toggle = await screen.findByRole('switch', { name: 'Izin penuh' });
+  await waitFor(() => {
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+  });
+
+  fireEvent.click(toggle);
+
+  await waitFor(() => {
+    expect(
+      tauri.invoke.mock.calls.some((p) => p[0] === 'set_full_permissions'),
+    ).toBe(true);
+  });
+
+  // Begitu set_full_permissions pernah dipanggil, setiap get_full_permissions
+  // berikutnya (pembacaan ulang di dalam `catch`) ikut gagal di transport.
+  tauri.tolakGetFullPermissionsSetelahSet = 'transport IPC terputus saat pembacaan ulang';
+
+  const PESAN_GALAT_RUST =
+    'Mode izin penuh menyala sekarang, tetapi gagal disimpan: disk penuh ' +
+    '(/tmp/config). Saat aplikasi dibuka lagi mode ini akan kembali mati ' +
+    'dan setiap permintaan izin akan ditanyakan seperti biasa.';
+  tauri.setFullPermissions?.reject(PESAN_GALAT_RUST);
+
+  await waitFor(() => {
+    expect(toggle.getAttribute('aria-checked')).toBe('mixed');
+  });
+
+  // Klaim yang dilarang temuan ini secara eksplisit: layar tidak boleh
+  // bilang "mati" ("false") pada keadaan ini.
+  expect(toggle.getAttribute('aria-checked')).not.toBe('false');
+  expect(screen.getAllByText(/tidak diketahui/i).length).toBeGreaterThanOrEqual(1);
+
+  // Pesan galat dari Rust sendiri tetap tampil apa adanya — tidak dibuang
+  // hanya karena pembacaan ulang juga gagal.
+  const semuaAlert = screen.getAllByRole('alert');
+  expect(semuaAlert.some((el) => el.textContent === PESAN_GALAT_RUST)).toBe(true);
 });

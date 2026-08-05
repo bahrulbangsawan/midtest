@@ -44,18 +44,32 @@ function labelStatus(status: StatusKoneksi): string {
   return 'Gagal tersambung';
 }
 
+/**
+ * Keadaan mode izin penuh sebagaimana diketahui frontend.
+ *
+ * Sengaja tiga nilai, bukan `boolean`. Temuan tinjauan pra-gabung yang
+ * memicu berkas ini: `get_full_permissions` dan `set_full_permissions` bisa
+ * gagal di lapisan IPC itu sendiri — bukan `Err` yang dikembalikan Rust,
+ * tapi kegagalan transport sebelum perintahnya sempat berjalan sama sekali
+ * (jendela tertutup separuh, sidecar belum siap, dsb). Pada kegagalan itu
+ * frontend sungguh tidak tahu apakah flag di memori Rust sedang menyala atau
+ * mati; Rust sendiri boleh jadi masih menyetujui setiap permintaan izin
+ * otomatis. Menjatuhkan kegagalan itu ke `'mati'` (persis yang dilakukan
+ * `boolean` lama lewat nilai bawaan `false`-nya) berarti pil amber penanda
+ * satu-satunya di header — lihat header di bawah — lenyap padahal
+ * persetujuan otomatis sungguhan mungkin masih berjalan. Itulah arah yang
+ * tidak boleh pernah terjadi pada kendali ini: "tidak tahu" wajib tampak
+ * sebagai "tidak tahu", bukan diam-diam sebagai "aman".
+ */
+type KeadaanIzinPenuh = 'nyala' | 'mati' | 'tidak-diketahui';
+
 function App() {
   const [status, setStatus] = useState<StatusKoneksi>('menyambung');
   const [agen, setAgen] = useState<AgentInfo | null>(null);
   const [galat, setGalat] = useState<string | null>(null);
   const [terputus, setTerputus] = useState<string | null>(null);
 
-  /**
-   * Mode izin penuh — bertahan lintas peluncuran lewat `settings::save` di
-   * sisi Rust (Task 3). Bawaan `false`: bertanya adalah sisi yang aman
-   * sebelum `get_full_permissions` sungguhan menjawab saat mount.
-   */
-  const [izinPenuh, setIzinPenuh] = useState(false);
+  const [izinPenuh, setIzinPenuh] = useState<KeadaanIzinPenuh>('mati');
   const [izinPenuhGalat, setIzinPenuhGalat] = useState<string | null>(null);
   const [sedangMengubahIzin, setSedangMengubahIzin] = useState(false);
 
@@ -117,26 +131,43 @@ function App() {
    * sendiri sudah dirangkai Rust sesuai arah perubahan (lihat
    * `persist_failure_message`) dan ditampilkan apa adanya, sama seperti
    * `galat` koneksi di atas.
+   *
+   * # Saat pembacaan ulang itu SENDIRI gagal
+   *
+   * Ini beda dari `Err` yang dikembalikan `set_full_permissions`. Jaminan
+   * kontrak Rust ("flag memori sudah berubah tanpa syarat") hanya berlaku
+   * untuk `Err` yang sungguh datang dari perintah itu berjalan. Bila
+   * `get_full_permissions()` gagal di lapisan IPC (perintahnya sendiri tidak
+   * sempat berjalan), tidak ada jaminan apa pun tentang keadaan sungguhan —
+   * nilai optimis di atas cuma tebakan yang kebetulan pernah benar sesaat.
+   * Menampilkannya sebagai kebenaran final berarti persis kegagalan yang
+   * memicu berkas ini: pengguna klik "matikan", kedua panggilan gagal di
+   * transport, dan layar bilang "mati" sementara Rust tetap menyetujui
+   * segalanya. Jadi jatuhkan ke `'tidak-diketahui'`, bukan nilai optimis dan
+   * bukan nilai sebelum tombol ditekan.
    */
   async function ubahIzinPenuh() {
     if (sedangMengubahIzin) return;
-    const nilaiBaru = !izinPenuh;
+    // Tidak terdefinisi untuk keadaan 'tidak-diketahui': lihat tombolnya di
+    // JSX, sengaja dimatikan pada keadaan itu karena "kebalikan dari yang
+    // tidak diketahui" tidak punya arti untuk dikirim ke Rust.
+    if (izinPenuh === 'tidak-diketahui') return;
+    const nilaiBaru: KeadaanIzinPenuh = izinPenuh === 'nyala' ? 'mati' : 'nyala';
 
     setSedangMengubahIzin(true);
     setIzinPenuhGalat(null);
     setIzinPenuh(nilaiBaru);
 
     try {
-      await invoke('set_full_permissions', { enabled: nilaiBaru });
+      await invoke('set_full_permissions', { enabled: nilaiBaru === 'nyala' });
     } catch (penyebab) {
       try {
         const nyata = await invoke<boolean>('get_full_permissions');
-        setIzinPenuh(nyata);
+        setIzinPenuh(nyata ? 'nyala' : 'mati');
       } catch {
-        // Pembacaan ulang pun gagal. Nilai optimis di atas tetap dipakai:
-        // kontrak Rust menjamin flag di memori sudah menjadi `nilaiBaru`
-        // seketika `set_full_permissions` dipanggil, terlepas dari hasil
-        // penyimpanannya — jadi itu tetap kebenaran terbaik yang kita punya.
+        // Pembacaan ulang pun gagal lewat lapisan IPC — lihat penjelasan di
+        // atas kenapa nilai optimis tidak lagi bisa dipakai di sini.
+        setIzinPenuh('tidak-diketahui');
       }
       setIzinPenuhGalat(String(penyebab));
     } finally {
@@ -184,17 +215,35 @@ function App() {
 
   // Baca keadaan izin penuh yang sungguh berlaku (bertahan lintas peluncuran
   // lewat berkas pengaturan) begitu jendela dibuka — lihat brief Task 8, butir
-  // 1. Bawaan `false` di atas hanya berlaku sampai jawaban ini tiba.
+  // 1. Bawaan `'mati'` di atas hanya berlaku sampai jawaban ini tiba — jendela
+  // yang baru saja dibuka belum sempat menanyakan apa pun, jadi tidak ada
+  // bacaan sebelumnya untuk ditampilkan; ini murni jeda singkat sebelum
+  // panggilan di bawah selesai, sama seperti `agen` yang mulai dari `null`.
+  //
+  // Wajib ada cabang penolakan (temuan tinjauan pra-gabung yang memicu
+  // berkas ini): `get_full_permissions` bisa gagal di lapisan IPC itu sendiri
+  // sebelum perintahnya sempat berjalan sama sekali — beda dari `Err` yang
+  // dikembalikan Rust. Tanpa cabang ini, kegagalan itu meninggalkan keadaan
+  // di `'mati'` selamanya sementara flag di memori Rust mungkin sungguh
+  // menyala dan menyetujui semua permintaan izin secara otomatis — persis
+  // arah yang tidak boleh pernah terjadi pada kendali ini. Jatuhkan ke
+  // `'tidak-diketahui'`, bukan diam-diam dibiarkan seperti `'mati'`.
   //
   // Tanpa ref penjaga dan tanpa bendera `dibatalkan`, tidak seperti
   // `sambungKe`: `get_full_permissions` murni membaca, tidak men-spawn apa
   // pun, jadi StrictMode memanggilnya dua kali tidak berakibat apa-apa selain
-  // dua pembacaan yang sama. `setState` pada komponen yang sudah dilepas pun
-  // sekadar no-op sejak React 18 — lihat catatan panjang di efek `sambungKe`.
+  // dua pembacaan yang sama (sukses maupun gagal). `setState` pada komponen
+  // yang sudah dilepas pun sekadar no-op sejak React 18 — lihat catatan
+  // panjang di efek `sambungKe`.
   useEffect(() => {
-    invoke<boolean>('get_full_permissions').then((nilai) => {
-      setIzinPenuh(nilai);
-    });
+    invoke<boolean>('get_full_permissions').then(
+      (nilai) => {
+        setIzinPenuh(nilai ? 'nyala' : 'mati');
+      },
+      () => {
+        setIzinPenuh('tidak-diketahui');
+      },
+    );
   }, []);
 
   useEffect(() => {
@@ -254,8 +303,15 @@ function App() {
           sadar kalau penandanya disembunyikan di balik interaksi. Ditaruh di
           header, bukan di dekat togglenya saja, supaya tetap terlihat
           sekalipun toggle dan header nanti dipisah tata letaknya di 2b-3.
+
+          Keadaan `'tidak-diketahui'` (temuan tinjauan pra-gabung) dapat pil
+          sendiri, bukan sekadar tidak menampilkan apa-apa seperti `'mati'`:
+          diam di sini persis kebalikan dari yang boleh terjadi pada kendali
+          ini, karena Rust boleh jadi masih menyetujui semuanya otomatis.
+          `role="alert"` (bukan `role="status"` seperti pil "menyala") supaya
+          pembaca layar mengabarkannya seketika, bukan menunggu giliran fokus.
         */}
-        {izinPenuh ? (
+        {izinPenuh === 'nyala' ? (
           <p
             role="status"
             className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400"
@@ -265,6 +321,18 @@ function App() {
               className="mr-1 inline-block size-1.5 rounded-full bg-amber-500"
             />
             Izin penuh menyala — permintaan izin disetujui otomatis
+          </p>
+        ) : izinPenuh === 'tidak-diketahui' ? (
+          <p
+            role="alert"
+            className="rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
+          >
+            <span
+              aria-hidden="true"
+              className="mr-1 inline-block size-1.5 rounded-full bg-destructive"
+            />
+            Status izin penuh tidak diketahui — mode ini bisa saja masih
+            menyala
           </p>
         ) : null}
       </header>
@@ -311,33 +379,59 @@ function App() {
         ulang dari `get_full_permissions`, bukan dikembalikan ke nilai
         sebelumnya. Penataan visualnya seadanya, sama seperti pemilih agen di
         atas — lihat brief Task 8, penataan sungguhan adalah pekerjaan 2b-3.
+
+        Keadaan `'tidak-diketahui'`: tombolnya sengaja DIMATIKAN, bukan
+        dibiarkan bisa ditekan dengan peringatan. Alasannya bukan estetika:
+        `ubahIzinPenuh` menghitung nilai baru sebagai kebalikan dari yang
+        tampil sekarang (`izinPenuh === 'nyala' ? 'mati' : 'nyala'`), dan
+        "kebalikan dari tidak diketahui" tidak punya arti — mengirim tebakan
+        itu ke `set_full_permissions` bisa menyalakan sesuatu yang sebetulnya
+        sudah menyala (menyimpan ulang yang sama, tidak berbahaya) atau
+        mematikan sesuatu yang pengguna kira sudah mati padahal justru
+        sedang menyala (persis kegagalan yang harus dihindari kendali ini).
+        Jalan pulih yang ditawarkan sama seperti pola putusnya koneksi di
+        bawah: tutup dan buka kembali jendela, yang memicu pembacaan mount
+        yang baru. `aria-checked="mixed"` dipakai apa adanya sebagai nilai
+        ketiga yang tidak bisa disalahartikan sebagai "mati" — ARIA baku
+        untuk `role="switch"` sebetulnya cuma mengenal true/false, tapi pil
+        di header dan galat di bawah (keduanya `role="alert"`) yang membawa
+        kabar sungguhan untuk pembaca layar; atribut ini hanya menjaga supaya
+        togglenya sendiri tidak ikut berbohong "mati".
       */}
       <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
         <div>
           <p className="text-sm font-medium">Izin penuh</p>
           <p className="text-xs text-muted-foreground">
-            Permintaan izin dari agen akan disetujui otomatis tanpa bertanya.
+            {izinPenuh === 'tidak-diketahui'
+              ? 'Status sebenarnya tidak diketahui — tutup dan buka kembali jendela ini untuk memastikan.'
+              : 'Permintaan izin dari agen akan disetujui otomatis tanpa bertanya.'}
           </p>
         </div>
         <button
           type="button"
           role="switch"
-          aria-checked={izinPenuh}
+          aria-checked={
+            izinPenuh === 'nyala' ? true : izinPenuh === 'tidak-diketahui' ? 'mixed' : false
+          }
           aria-label="Izin penuh"
           onClick={() => void ubahIzinPenuh()}
-          disabled={sedangMengubahIzin}
+          disabled={sedangMengubahIzin || izinPenuh === 'tidak-diketahui'}
           className={
-            izinPenuh
+            izinPenuh === 'nyala'
               ? 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-primary transition-colors disabled:opacity-50'
-              : 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted transition-colors disabled:opacity-50'
+              : izinPenuh === 'tidak-diketahui'
+                ? 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted ring-2 ring-destructive/60 transition-colors disabled:opacity-50'
+                : 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted transition-colors disabled:opacity-50'
           }
         >
           <span
             aria-hidden="true"
             className={
-              izinPenuh
+              izinPenuh === 'nyala'
                 ? 'inline-block size-4 translate-x-4 rounded-full bg-background transition-transform'
-                : 'inline-block size-4 translate-x-0.5 rounded-full bg-background transition-transform'
+                : izinPenuh === 'tidak-diketahui'
+                  ? 'inline-block size-4 translate-x-2 rounded-full bg-background transition-transform'
+                  : 'inline-block size-4 translate-x-0.5 rounded-full bg-background transition-transform'
             }
           />
         </button>
