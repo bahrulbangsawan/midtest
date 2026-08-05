@@ -51,6 +51,15 @@ function App() {
   const [terputus, setTerputus] = useState<string | null>(null);
 
   /**
+   * Mode izin penuh — bertahan lintas peluncuran lewat `settings::save` di
+   * sisi Rust (Task 3). Bawaan `false`: bertanya adalah sisi yang aman
+   * sebelum `get_full_permissions` sungguhan menjawab saat mount.
+   */
+  const [izinPenuh, setIzinPenuh] = useState(false);
+  const [izinPenuhGalat, setIzinPenuhGalat] = useState<string | null>(null);
+  const [sedangMengubahIzin, setSedangMengubahIzin] = useState(false);
+
+  /**
    * Sambungkan (atau pindahkan) sesi ke `agentId`.
    *
    * Satu-satunya jalur yang memanggil `connect_agent` — dipakai baik oleh
@@ -84,6 +93,55 @@ function App() {
         setGalat(String(penyebab));
       },
     );
+  }
+
+  /**
+   * Nyalakan/matikan mode izin penuh, sesuai nilai kebalikan dari yang
+   * sedang tampil.
+   *
+   * # Kontrak `set_full_permissions`: perubahan di memori Rust selalu
+   *   berlaku, termasuk saat hasilnya `Err`
+   *
+   * Ini menyimpang dari konvensi biasa ("gagal, jadi kembalikan tombolnya").
+   * Rollback di sini justru berbahaya: `Err` hanya berarti gagal *disimpan
+   * ke disk* — flag di memori Rust sudah berubah lebih dulu, tanpa syarat
+   * (lihat `apply_and_persist_full_permissions` di `commands.rs`). Menampilkan
+   * nilai sebelum tombol ditekan setelah `Err` berarti layar bilang "mati"
+   * sementara persetujuan otomatis sungguhan tetap *menyala* untuk sisa sesi
+   * — kebohongan UI tepat pada kendali yang paling tidak boleh berbohong.
+   *
+   * Jadi: set optimis dulu (nilai barunya memang yang berlaku di memori
+   * seketika `set_full_permissions` dipanggil), dan bila `Err`, baca ulang
+   * `get_full_permissions()` alih-alih menebak — itulah satu-satunya sumber
+   * kebenaran tentang apa yang sungguh berlaku sekarang. Pesan galatnya
+   * sendiri sudah dirangkai Rust sesuai arah perubahan (lihat
+   * `persist_failure_message`) dan ditampilkan apa adanya, sama seperti
+   * `galat` koneksi di atas.
+   */
+  async function ubahIzinPenuh() {
+    if (sedangMengubahIzin) return;
+    const nilaiBaru = !izinPenuh;
+
+    setSedangMengubahIzin(true);
+    setIzinPenuhGalat(null);
+    setIzinPenuh(nilaiBaru);
+
+    try {
+      await invoke('set_full_permissions', { enabled: nilaiBaru });
+    } catch (penyebab) {
+      try {
+        const nyata = await invoke<boolean>('get_full_permissions');
+        setIzinPenuh(nyata);
+      } catch {
+        // Pembacaan ulang pun gagal. Nilai optimis di atas tetap dipakai:
+        // kontrak Rust menjamin flag di memori sudah menjadi `nilaiBaru`
+        // seketika `set_full_permissions` dipanggil, terlepas dari hasil
+        // penyimpanannya — jadi itu tetap kebenaran terbaik yang kita punya.
+      }
+      setIzinPenuhGalat(String(penyebab));
+    } finally {
+      setSedangMengubahIzin(false);
+    }
   }
 
   // StrictMode menjalankan efek dua kali di mode pengembangan. `connect_agent`
@@ -122,6 +180,21 @@ function App() {
     // punya ref penjaga, jadi setup #2 memasangnya ulang — dan cleanup-nya
     // melepas pendengar Tauri sungguhan, yang bukan no-op.
     sambungKe(AGEN_BAWAAN.id);
+  }, []);
+
+  // Baca keadaan izin penuh yang sungguh berlaku (bertahan lintas peluncuran
+  // lewat berkas pengaturan) begitu jendela dibuka — lihat brief Task 8, butir
+  // 1. Bawaan `false` di atas hanya berlaku sampai jawaban ini tiba.
+  //
+  // Tanpa ref penjaga dan tanpa bendera `dibatalkan`, tidak seperti
+  // `sambungKe`: `get_full_permissions` murni membaca, tidak men-spawn apa
+  // pun, jadi StrictMode memanggilnya dua kali tidak berakibat apa-apa selain
+  // dua pembacaan yang sama. `setState` pada komponen yang sudah dilepas pun
+  // sekadar no-op sejak React 18 — lihat catatan panjang di efek `sambungKe`.
+  useEffect(() => {
+    invoke<boolean>('get_full_permissions').then((nilai) => {
+      setIzinPenuh(nilai);
+    });
   }, []);
 
   useEffect(() => {
@@ -172,6 +245,28 @@ function App() {
           {labelStatus(status)}
           {agen ? ` — ${agen.name} di ${agen.cwd}` : null}
         </p>
+
+        {/*
+          Butir 4 dari brief Task 8: saat mode izin penuh menyala, penandanya
+          wajib terlihat tanpa membuka menu apa pun — bertahan lintas
+          peluncuran lewat berkas pengaturan (Task 3) berarti pengguna bisa
+          membuka jendela ini besok dalam keadaan menyetujui segalanya tanpa
+          sadar kalau penandanya disembunyikan di balik interaksi. Ditaruh di
+          header, bukan di dekat togglenya saja, supaya tetap terlihat
+          sekalipun toggle dan header nanti dipisah tata letaknya di 2b-3.
+        */}
+        {izinPenuh ? (
+          <p
+            role="status"
+            className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400"
+          >
+            <span
+              aria-hidden="true"
+              className="mr-1 inline-block size-1.5 rounded-full bg-amber-500"
+            />
+            Izin penuh menyala — permintaan izin disetujui otomatis
+          </p>
+        ) : null}
       </header>
 
       {/*
@@ -204,6 +299,58 @@ function App() {
           );
         })}
       </div>
+
+      {/*
+        Toggle mode izin penuh (Task 3 menyimpannya, Task 8 memberinya
+        kendali). Nilainya diset optimis begitu ditekan: kontrak
+        `set_full_permissions` menjamin flag di memori Rust sudah berubah
+        seketika perintah dipanggil, terlepas dari berhasil-tidaknya
+        penyimpanan ke disk (lihat `ubahIzinPenuh` di atas) — jadi menunggu
+        jawaban dulu sebelum mengubah tampilan hanya akan membuat togglenya
+        terasa tertunda tanpa alasan. Bila jawabannya `Err`, keadaan dibaca
+        ulang dari `get_full_permissions`, bukan dikembalikan ke nilai
+        sebelumnya. Penataan visualnya seadanya, sama seperti pemilih agen di
+        atas — lihat brief Task 8, penataan sungguhan adalah pekerjaan 2b-3.
+      */}
+      <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+        <div>
+          <p className="text-sm font-medium">Izin penuh</p>
+          <p className="text-xs text-muted-foreground">
+            Permintaan izin dari agen akan disetujui otomatis tanpa bertanya.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={izinPenuh}
+          aria-label="Izin penuh"
+          onClick={() => void ubahIzinPenuh()}
+          disabled={sedangMengubahIzin}
+          className={
+            izinPenuh
+              ? 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-primary transition-colors disabled:opacity-50'
+              : 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted transition-colors disabled:opacity-50'
+          }
+        >
+          <span
+            aria-hidden="true"
+            className={
+              izinPenuh
+                ? 'inline-block size-4 translate-x-4 rounded-full bg-background transition-transform'
+                : 'inline-block size-4 translate-x-0.5 rounded-full bg-background transition-transform'
+            }
+          />
+        </button>
+      </div>
+
+      {izinPenuhGalat ? (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+        >
+          {izinPenuhGalat}
+        </p>
+      ) : null}
 
       {/*
         Paling banyak satu kabar buruk untuk satu kegagalan. Sambungan yang
