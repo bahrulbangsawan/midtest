@@ -407,7 +407,7 @@ function renderHtml(steps, images, meta) {
     max-width: 100%;
     max-height: 100%;
     aspect-ratio: var(--rasio, 16 / 10);
-    transition: transform 0s linear;
+    transition: transform .45s cubic-bezier(.22,.61,.36,1);
   }
   .lapis {
     position: absolute;
@@ -416,7 +416,6 @@ function renderHtml(steps, images, meta) {
     height: 100%;
     object-fit: fill;
     opacity: 0;
-    transition: opacity 0s ease;
   }
   .lapis.tampak { opacity: 1; }
 
@@ -429,7 +428,7 @@ function renderHtml(steps, images, meta) {
     pointer-events: none;
     opacity: 0;
     filter: drop-shadow(0 2px 5px rgba(0,0,0,.55));
-    transition: left 0s, top 0s, opacity .3s ease;
+    transition: opacity .3s ease;
   }
   .kursor.tampak { opacity: 1; }
 
@@ -443,7 +442,6 @@ function renderHtml(steps, images, meta) {
     background: rgba(47,109,246,.95);
     box-shadow: 0 0 0 2.5px #fff, 0 2px 8px rgba(0,0,0,.4);
     opacity: 0;
-    transition: opacity .25s ease;
   }
   .titik.tampak { opacity: 1; }
   .titik::after {
@@ -619,11 +617,31 @@ function renderHtml(steps, images, meta) {
     maju: document.getElementById('maju')
   };
 
+  var animasiAktif = [];
+  var animKursor = null;
+
   function skala(ms) { return Math.round(ms / kecepatan); }
   function jadwal(fn, ms) { timer.push(setTimeout(fn, skala(ms))); }
   function bersihkanTimer() {
     for (var i = 0; i < timer.length; i++) clearTimeout(timer[i]);
     timer = [];
+  }
+
+  // Web Animations API dipakai, bukan transisi CSS: waktunya eksplisit dan
+  // transform/opacity dijalankan di compositor sehingga gerakannya halus.
+  function gerak(sasaran, bingkai, opsi) {
+    if (!sasaran || !sasaran.animate) return null;
+    var anim = sasaran.animate(bingkai, opsi);
+    animasiAktif.push(anim);
+    return anim;
+  }
+
+  function batalAnimasi() {
+    for (var i = 0; i < animasiAktif.length; i++) {
+      try { animasiAktif[i].cancel(); } catch (e) { /* sudah selesai */ }
+    }
+    animasiAktif = [];
+    animKursor = null;
   }
 
   el.judul.textContent = data.judul;
@@ -683,13 +701,13 @@ function renderHtml(steps, images, meta) {
       titik.style.top = (item.penanda.centerY * 100) + '%';
       geser.appendChild(titik);
 
-      // Kursor mulai dari posisi langkah sebelumnya agar perpindahannya terbaca.
+      // Kursor dipaku di titik sasaran; perpindahan dari posisi langkah
+      // sebelumnya dikerjakan sebagai translate, bukan perubahan left/top.
       var kursor = document.createElement('div');
       kursor.className = 'kursor';
       kursor.innerHTML = KURSOR;
-      kursor.style.transitionDuration = '0ms';
-      kursor.style.left = (kursorTerakhir.x * 100) + '%';
-      kursor.style.top = (kursorTerakhir.y * 100) + '%';
+      kursor.style.left = (item.penanda.centerX * 100) + '%';
+      kursor.style.top = (item.penanda.centerY * 100) + '%';
       geser.appendChild(kursor);
     }
 
@@ -704,10 +722,7 @@ function renderHtml(steps, images, meta) {
     geser.style.transformOrigin = penanda
       ? (penanda.centerX * 100) + '% ' + (penanda.centerY * 100) + '%'
       : '50% 50%';
-    if (zoomManual) {
-      geser.style.transitionDuration = '450ms';
-      geser.style.transform = 'scale(1.8)';
-    }
+    if (zoomManual) geser.style.transform = 'scale(1.8)';
     var balik = zoomManual ? 1 / 1.8 : 1;
     var titik = geser.querySelector('.titik');
     var kursor = geser.querySelector('.kursor');
@@ -730,49 +745,45 @@ function renderHtml(steps, images, meta) {
     var kursor = geser.querySelector('.kursor');
     var adaPenanda = Boolean(item.penanda);
     var total = adaPenanda ? 3000 : 2000;
-
-    el.lini.style.transition = 'none';
-    el.lini.style.width = '0';
+    var balik = zoomManual ? 1 / 1.8 : 1;
 
     if (hematGerak) {
       if (sesudah) sesudah.classList.add('tampak');
       if (titik) titik.classList.add('tampak');
-      if (kursor) {
-        kursor.classList.add('tampak');
-        kursor.style.left = (item.penanda.centerX * 100) + '%';
-        kursor.style.top = (item.penanda.centerY * 100) + '%';
-      }
+      if (kursor) kursor.classList.add('tampak');
       el.lini.style.width = '100%';
       if (sedangPutar) jadwal(lanjut, total);
       return;
     }
 
-    requestAnimationFrame(function () {
-      el.lini.style.transition = 'width ' + skala(total) + 'ms linear';
-      el.lini.style.width = '100%';
-      if (!zoomManual) {
-        geser.style.transitionDuration = skala(4200) + 'ms';
-        geser.style.transform = 'scale(1.09)';
-      }
-    });
+    el.lini.style.width = '0';
+    gerak(el.lini, [{ width: '0%' }, { width: '100%' }],
+      { duration: skala(total), fill: 'forwards', easing: 'linear' });
 
     if (adaPenanda && kursor) {
-      jadwal(function () {
-        kursor.classList.add('tampak');
-        kursor.style.transitionDuration = skala(800) + 'ms, ' + skala(800) + 'ms, 300ms';
-        kursor.style.left = (item.penanda.centerX * 100) + '%';
-        kursor.style.top = (item.penanda.centerY * 100) + '%';
-        kursorTerakhir = { x: item.penanda.centerX, y: item.penanda.centerY };
-      }, 100);
-      jadwal(function () { if (titik) titik.classList.add('tampak'); }, 900);
+      var dx = (kursorTerakhir.x - item.penanda.centerX) * geser.offsetWidth;
+      var dy = (kursorTerakhir.y - item.penanda.centerY) * geser.offsetHeight;
+      kursor.classList.add('tampak');
+      animKursor = gerak(kursor, [
+        { transform: 'translate(' + dx + 'px, ' + dy + 'px) scale(' + balik + ')' },
+        { transform: 'translate(0px, 0px) scale(' + balik + ')' }
+      ], {
+        duration: skala(800),
+        delay: skala(100),
+        fill: 'both',
+        easing: 'cubic-bezier(.33,.72,.3,1)'
+      });
+      kursorTerakhir = { x: item.penanda.centerX, y: item.penanda.centerY };
+
+      gerak(titik, [{ opacity: 0 }, { opacity: 1 }],
+        { duration: skala(250), delay: skala(900), fill: 'forwards' });
     }
 
-    jadwal(function () {
-      if (sesudah) {
-        sesudah.style.transitionDuration = skala(600) + 'ms';
-        sesudah.classList.add('tampak');
-      }
-    }, adaPenanda ? 1200 : 300);
+    gerak(sesudah, [{ opacity: 0 }, { opacity: 1 }], {
+      duration: skala(600),
+      delay: skala(adaPenanda ? 1200 : 300),
+      fill: 'forwards'
+    });
 
     jadwal(lanjut, total);
   }
@@ -796,6 +807,7 @@ function renderHtml(steps, images, meta) {
 
   function keLangkah(i) {
     bersihkanTimer();
+    batalAnimasi();
     posisi = Math.max(0, Math.min(langkah.length - 1, i));
     var item = langkah[posisi];
 
@@ -855,11 +867,14 @@ function renderHtml(steps, images, meta) {
     zoomManual = !zoomManual;
     var geser = el.bingkai.querySelector('.geser');
     if (!geser) return;
+
+    // Zoom manual mengambil alih transform, jadi gerak kursor dihentikan dulu.
+    if (animKursor) { animKursor.cancel(); animKursor = null; }
+
+    var kursor = geser.querySelector('.kursor');
+    if (kursor) kursor.style.transform = 'scale(' + (zoomManual ? 1 / 1.8 : 1) + ')';
+    if (!zoomManual) geser.style.transform = 'scale(1)';
     terapkanZoom(geser, langkah[posisi].penanda);
-    if (!zoomManual) {
-      geser.style.transitionDuration = '450ms';
-      geser.style.transform = 'scale(1)';
-    }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowRight') keLangkah(posisi + 1);
