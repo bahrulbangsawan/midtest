@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { StrictMode } from 'react';
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 /**
@@ -158,4 +158,78 @@ test('kegagalan connect_agent sampai ke layar sebagai pesan, bukan diam', async 
   expect(kabar.textContent).toBe(PESAN_DARI_RUST);
   expect(kabar.textContent).toContain('claude-agent-acp');
   expect(kabar.textContent).toContain('npm install');
+});
+
+/**
+ * Pemilih agen: memilih Codex memanggil `connect_agent` dengan id baru,
+ * menampilkan keadaan menyambung selama prosesnya, dan menampilkan agen aktif
+ * yang baru begitu berhasil — tanpa pernah diam-diam mengklaim agen lama
+ * masih tersambung.
+ */
+test('memilih agen lain memanggil connect_agent dengan id baru dan menampilkan agen aktif yang baru', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  const tombolClaude = screen.getByRole('button', { name: 'Claude' });
+  const tombolCodex = screen.getByRole('button', { name: 'Codex' });
+  expect(tombolClaude.getAttribute('aria-pressed')).toBe('true');
+  expect(tombolCodex.getAttribute('aria-pressed')).toBe('false');
+
+  fireEvent.click(tombolCodex);
+
+  // Berpindah tidak pernah diam-diam: status kembali ke "menyambung" seketika.
+  expect(screen.getByText('Menyambungkan…')).toBeDefined();
+  expect(tombolCodex.hasAttribute('disabled')).toBe(true);
+
+  const panggilanConnect = tauri.invoke.mock.calls.filter(
+    (panggilan) => panggilan[0] === 'connect_agent',
+  );
+  expect(panggilanConnect).toHaveLength(2);
+  expect(panggilanConnect[1]?.[1]).toEqual({ agentId: 'codex' });
+
+  const INFO_CODEX = {
+    ...INFO_AGEN,
+    id: 'codex',
+    label: 'Codex',
+    name: 'codex-acp 1.0',
+  };
+  tauri.connect?.resolve(INFO_CODEX);
+
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+    expect(screen.getByText(/codex-acp 1\.0/)).toBeDefined();
+  });
+  expect(
+    screen.getByRole('button', { name: 'Codex' }).getAttribute('aria-pressed'),
+  ).toBe('true');
+  expect(
+    screen.getByRole('button', { name: 'Claude' }).getAttribute('aria-pressed'),
+  ).toBe('false');
+});
+
+/** Kegagalan saat berpindah agen tampil apa adanya, bukan diam-diam mengklaim agen lama masih aktif. */
+test('kegagalan saat berpindah agen menampilkan pesan dan tidak lagi mengklaim agen lama aktif', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+
+  const PESAN_CODEX_LOGIN =
+    'Codex menolak membuka sesi: authentication required. Kemungkinan besar ' +
+    'Codex belum diautentikasi di mesin ini. Jalankan `codex login` lewat ' +
+    'terminal, lalu coba sambungkan lagi.';
+  tauri.connect?.reject(PESAN_CODEX_LOGIN);
+
+  await waitFor(() => {
+    expect(screen.getByText('Gagal tersambung')).toBeDefined();
+  });
+  expect(screen.getByRole('alert').textContent).toBe(PESAN_CODEX_LOGIN);
+  // Tidak ada lagi klaim diam-diam bahwa Claude masih tersambung.
+  expect(screen.queryByText(/claude-agent-acp/)).toBeNull();
 });

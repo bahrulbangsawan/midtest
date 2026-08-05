@@ -29,4 +29,10 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process"
 # Transport `Lines` milik agent-client-protocol berbicara dalam Sink/Stream
 # `futures`, jadi agen palsu di test butuh channel-nya. Hanya untuk test.
 futures = "0.3"
+# `kill(pid, 0)`: satu-satunya cara memeriksa dari Rust apakah proses OS milik
+# adapter *sungguhan* masih hidup, dipakai test Task 7 untuk membuktikan
+# penutupan sesi lama benar-benar mematikan prosesnya — bukan sekadar
+# mempercayai kode terlihat benar. Sudah ada di Cargo.lock lewat
+# agent-client-protocol (async-process), jadi ini tidak menambah unduhan.
+libc = "0.2"
 

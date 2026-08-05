@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "futures",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

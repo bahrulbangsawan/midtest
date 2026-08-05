@@ -114,6 +114,32 @@ fn user_message(error: &AcpError) -> String {
     }
 }
 
+/// Petakan kegagalan `session/new` pada agen Codex ke pesan yang menyebut
+/// `codex login`.
+///
+/// **Berbasis perilaku, bukan tebakan atas `authMethods`.** Saat handshake
+/// `initialize`, Codex melaporkan dua metode auth padahal belum login, dan
+/// tidak diketahui apakah daftar itu berubah setelah login — jadi
+/// menyimpulkan status auth darinya berarti menebak. Aplikasi ini juga
+/// sengaja **tidak pernah menyentuh kredensial**; itulah yang menopang
+/// argumen kepatuhan ToS di spec, dan kenapa tidak ada alur login di sini
+/// sama sekali.
+///
+/// Satu-satunya sinyal yang jujur adalah mencoba: `session/new` tidak
+/// memanggil model, jadi percobaannya tidak berbiaya. Karena itu **setiap**
+/// kegagalan `session/new` pada agen Codex — bukan hanya yang kelihatan
+/// seperti galat auth — dipetakan ke pesan ini. Detail teknisnya tetap ikut
+/// terbawa lewat `{error}`, supaya kegagalan yang sungguhan bukan soal auth
+/// (mis. sidecar Midscene macet) masih bisa didiagnosis dari pesan yang sama.
+#[must_use]
+fn codex_session_failure_message(error: &AcpError) -> String {
+    format!(
+        "Codex menolak membuka sesi: {error}. Kemungkinan besar Codex belum \
+         diautentikasi di mesin ini. Jalankan `codex login` lewat terminal, \
+         lalu coba sambungkan lagi."
+    )
+}
+
 /// Semua yang dibutuhkan satu giliran.
 ///
 /// Sengaja `Clone` dan bebas dari [`AcpHandle`] supaya bisa diambil keluar dari
@@ -251,7 +277,10 @@ pub async fn connect_agent(
 /// - id agen tak dikenal → menyebut id itu;
 /// - biner adapter tak ditemukan → [`missing_binary_message`], berbeda dari
 ///   galat protokol mana pun yang dihasilkan [`user_message`];
-/// - kegagalan setelahnya → lihat [`user_message`].
+/// - `session/new` gagal pada agen Codex → [`codex_session_failure_message`],
+///   yang menyebut `codex login` — lihat dokumentasi fungsi itu untuk kenapa
+///   ini berbasis perilaku, bukan tebakan atas `authMethods`;
+/// - kegagalan lain → lihat [`user_message`].
 async fn connect_agent_body(
     state: &AppState,
     agent_id: String,
@@ -280,7 +309,12 @@ async fn connect_agent_body(
             // Handshake sudah berhasil, jadi proses anaknya hidup. Jangan
             // biarkan ia bocor hanya karena sesinya gagal dibuat.
             state.close(handle).await;
-            return Err(user_message(&error));
+            let message = if spec.id == "codex" {
+                codex_session_failure_message(&error)
+            } else {
+                user_message(&error)
+            };
+            return Err(message);
         }
     };
 
@@ -1211,5 +1245,400 @@ mod tests {
                 "penutupan yang disengaja tidak boleh melaporkan putus: {payload}"
             );
         }
+    }
+
+    // -------------------------------------- berpindah agen (adapter sungguhan palsu)
+    //
+    // Semua test di bawah ini sengaja **tidak** memakai `FakeAgent`
+    // (`acp::testing`): `FakeAgent` bicara lewat kanal in-process, jadi ia
+    // tidak pernah menyentuh `connect()` sungguhan — jalur yang justru men-
+    // spawn proses OS lewat `spec.bin`, dicari lewat PATH proses ini, **bukan**
+    // lewat closure `path_lookup` yang hanya dipakai `probe`. Membuktikan
+    // "sesi lama benar-benar ditutup" dan "tidak ada proses tertinggal" perlu
+    // proses OS sungguhan untuk diperiksa hidup-matinya — kode yang "kelihatan
+    // benar" tidak cukup, itulah inti tuntutan Task 7.
+    //
+    // Mesin ini punya `claude-agent-acp` dan `codex-acp` **sungguhan**
+    // terpasang di PATH aslinya (lihat brief Task 7). Membiarkan `path_lookup`
+    // palsu meloloskan `probe` tanpa membatasi PATH proses ini berarti test
+    // diam-diam men-spawn adapter sungguhan. [`RestrictedPath`] mengganti PATH
+    // proses ini ke direktori berisi biner palsu ([`StubAdapter`]) sepanjang
+    // hidupnya, dan memulihkannya saat di-drop.
+
+    /// Kunci proses: hanya satu test boleh mengubah PATH proses ini di satu
+    /// waktu. Tidak ada test lain di crate ini yang membaca PATH sungguhan
+    /// (satu-satunya jalur yang melakukannya adalah `real_path_lookup`, yang
+    /// tidak dipanggil `connect_agent_body` di test — lihat `connect_agent`),
+    /// jadi kunci ini hanya perlu menyerialkan test-test di bagian ini
+    /// terhadap satu sama lain, bukan terhadap seluruh suite.
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Membatasi `PATH` proses test ini ke sekumpulan direktori, dan
+    /// memulihkan nilai aslinya saat di-drop — bahkan bila test panik di
+    /// tengah jalan (unwind menjalankan `Drop`).
+    struct RestrictedPath {
+        lama: Option<std::ffi::OsString>,
+        _kunci: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl RestrictedPath {
+        fn new(dirs: &[&Path]) -> Self {
+            let kunci = PATH_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let lama = std::env::var_os("PATH");
+            let baru =
+                std::env::join_paths(dirs.iter().copied()).expect("path direktori uji harus sah");
+            std::env::set_var("PATH", baru);
+            Self {
+                lama,
+                _kunci: kunci,
+            }
+        }
+    }
+
+    impl Drop for RestrictedPath {
+        fn drop(&mut self) {
+            match self.lama.take() {
+                Some(nilai) => std::env::set_var("PATH", nilai),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Templat biner adapter palsu: skrip Python yang bicara JSON-RPC baris-
+    /// demi-baris lewat stdio, persis format `Lines` yang dipakai `AcpAgent`
+    /// sungguhan (`agent-client-protocol-2.0.0/src/acp_agent.rs:727`). Cukup
+    /// untuk menyelesaikan `initialize` dan `session/new` — dua-duanya yang
+    /// dibutuhkan `connect_agent_body` — tanpa jadi adapter sungguhan.
+    ///
+    /// `__PID_LOG__` diganti path berkas tempat skrip mencatat PID-nya sendiri
+    /// setiap kali dijalankan, supaya test bisa memeriksa hidup-matinya
+    /// prosesnya dari sisi Rust.
+    ///
+    /// `__GAGAL_SESI__` diganti `True`/`False`: dipakai test pemetaan galat
+    /// Codex untuk mensimulasikan agen yang menolak `session/new` (mis. karena
+    /// belum `codex login`) tanpa perlu autentikasi sungguhan — aplikasi ini
+    /// tidak pernah menyentuh kredensial sama sekali, termasuk di test.
+    ///
+    /// `__KELUAR_LAMBAT__` diganti `True`/`False`: saat `True`, skrip menunda
+    /// diri 300ms setelah stdin-nya EOF sebelum benar-benar keluar. Ini bukan
+    /// hiasan — lihat dokumentasi
+    /// [`menyambung_agen_kedua_menutup_agen_lama_sebelum_membuka_yang_baru`]
+    /// untuk kenapa jeda ini satu-satunya cara membuktikan urutan penutupan
+    /// tanpa bergantung pada seberapa cepat *executor* kebetulan menjadwalkan
+    /// task yang di-drop.
+    const STUB_TEMPLATE: &str = r#"#!/usr/bin/python3
+import sys, os, json, time
+
+PID_LOG = "__PID_LOG__"
+with open(PID_LOG, "a") as f:
+    f.write(str(os.getpid()) + "\n")
+
+def kirim(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for baris in sys.stdin:
+    baris = baris.strip()
+    if not baris:
+        continue
+    try:
+        pesan = json.loads(baris)
+    except Exception:
+        continue
+    mid = pesan.get("id")
+    metode = pesan.get("method")
+    if mid is None:
+        continue
+    if metode == "initialize":
+        kirim({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+    elif metode == "session/new":
+        if __GAGAL_SESI__:
+            kirim({"jsonrpc": "2.0", "id": mid, "error": {"code": -32001, "message": "authentication required"}})
+        else:
+            kirim({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "sesi-stub"}})
+    else:
+        kirim({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "stub: unknown method"}})
+
+# stdin EOF: klien sudah menutup ujung tulisnya. Tunda sebelum benar-benar
+# keluar bila diminta — lihat dokumentasi __KELUAR_LAMBAT__ di atas.
+if __KELUAR_LAMBAT__:
+    time.sleep(0.3)
+"#;
+
+    static STUB_PEMBEDA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Satu adapter palsu di diska: direktori sementara berisi tepat satu
+    /// biner bernama `bin`, siap ditemukan lewat PATH yang dibatasi
+    /// [`RestrictedPath`].
+    struct StubAdapter {
+        dir: PathBuf,
+        pid_log: PathBuf,
+    }
+
+    impl StubAdapter {
+        /// `gagal_sesi = true` membuat skrip menolak `session/new` — dipakai
+        /// untuk menguji pemetaan galat Codex tanpa proses sungguhan.
+        /// `keluar_lambat = true` membuat skrip menunda 300ms sebelum keluar
+        /// setelah EOF — lihat dokumentasi [`STUB_TEMPLATE`].
+        fn new(bin: &str, gagal_sesi: bool, keluar_lambat: bool) -> Self {
+            let urutan = STUB_PEMBEDA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "midscene-stub-adapter-{}-{}",
+                std::process::id(),
+                urutan
+            ));
+            std::fs::create_dir_all(&dir).expect("direktori stub harus bisa dibuat");
+
+            let pid_log = dir.join("pid.log");
+            let isi = STUB_TEMPLATE
+                .replace("__PID_LOG__", &pid_log.display().to_string())
+                .replace("__GAGAL_SESI__", if gagal_sesi { "True" } else { "False" })
+                .replace(
+                    "__KELUAR_LAMBAT__",
+                    if keluar_lambat { "True" } else { "False" },
+                );
+
+            let biner = dir.join(bin);
+            std::fs::write(&biner, isi).expect("skrip stub harus bisa ditulis");
+
+            let mut izin = std::fs::metadata(&biner)
+                .expect("metadata skrip stub harus terbaca")
+                .permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut izin, 0o755);
+            std::fs::set_permissions(&biner, izin).expect("izin eksekusi harus bisa dipasang");
+
+            Self { dir, pid_log }
+        }
+
+        fn dir(&self) -> &Path {
+            &self.dir
+        }
+
+        /// PID terakhir yang dicatat skrip ini. Panik bila skrip belum pernah
+        /// dijalankan — itu berarti test yang memanggilnya salah rakit.
+        fn pid(&self) -> i32 {
+            let isi = std::fs::read_to_string(&self.pid_log).expect(
+                "log PID harus terbaca: skrip stub menulisnya sebelum membalas initialize apa pun",
+            );
+            isi.lines()
+                .next_back()
+                .expect("log PID tidak boleh kosong")
+                .trim()
+                .parse()
+                .expect("isi log PID harus berupa angka")
+        }
+    }
+
+    impl Drop for StubAdapter {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.dir));
+        }
+    }
+
+    /// Apakah proses `pid` masih hidup. Sinyal `0`: hanya memeriksa
+    /// keberadaan proses (dan izin kita mengirim sinyal ke sana), tidak
+    /// benar-benar mengirim apa pun ke proses itu.
+    fn masih_hidup(pid: i32) -> bool {
+        // SAFETY: `kill(pid, 0)` tidak membaca maupun menulis memori proses
+        // manapun; ia hanya query kernel. Aman dipanggil dengan `pid` mana pun.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Tunggu sampai `pid` benar-benar berhenti, atau `batas` terlampaui.
+    ///
+    /// Dipakai di tempat yang **tidak** menguji urutan penutupan (tidak ada
+    /// mutasi licik untuk dijaga di sana) — sekadar kebersihan "tidak ada
+    /// proses tertinggal" setelah sesi yang sudah di-`.await` sampai selesai
+    /// ditutup. Ada jeda kecil yang legitimate antara `state.close()` kembali
+    /// dan kernel benar-benar melepas slot proses; polling pendek menyerap itu
+    /// tanpa melonggarkan apa pun yang sedang dibuktikan.
+    async fn tunggu_mati(pid: i32, batas: Duration) -> bool {
+        let mulai = tokio::time::Instant::now();
+        loop {
+            if !masih_hidup(pid) {
+                return true;
+            }
+            if mulai.elapsed() >= batas {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Pencari PATH yang selalu bilang "ada" tanpa peduli apa yang dicari:
+    /// cocok dipakai di test-test ini karena keberadaan biner yang sungguhan
+    /// diperiksa lewat [`RestrictedPath`] + [`StubAdapter`], bukan lewat
+    /// closure ini. Closure ini hanya perlu meloloskan `probe`.
+    fn path_lookup_selalu_ada(_: &str) -> Option<PathBuf> {
+        Some(PathBuf::from("/diselesaikan-oleh-restricted-path"))
+    }
+
+    /// **Inti Task 7, dan inti klaim "penutupan benar-benar terjadi".**
+    ///
+    /// Menyambung ke agen kedua dengan sesi pertama masih berjalan harus
+    /// menutup sesi pertama **sebelum** membuka yang baru — dibuktikan lewat
+    /// urutan waktu yang sungguhan, bukan dengan membaca kode dan
+    /// memercayainya.
+    ///
+    /// **Kenapa adapter `claude` (yang lama) sengaja lambat keluar.** Sinyal
+    /// paling jujur untuk "ditunggu penuh" vs "sekadar di-drop" bukan
+    /// keberadaan proses OS-nya — keduanya berakhir membunuh proses yang sama
+    /// cepatnya, karena men-drop `AcpHandle` juga men-drop `shutdown_tx`, yang
+    /// membangunkan closure koneksinya di background lewat *executor* yang
+    /// sama, seringkali dalam hitungan milidetik. Test awal yang hanya
+    /// memeriksa "prosesnya sudah mati" — dengan atau tanpa jeda — gagal
+    /// membedakan keduanya persis karena itu.
+    ///
+    /// Yang benar-benar berbeda adalah **apakah `connect()` kedua menunggu**.
+    /// `StubAdapter` di sini ditulis menunda diri 300ms setelah stdin-nya EOF
+    /// sebelum benar-benar keluar (lihat `STUB_TEMPLATE`/`keluar_lambat`).
+    /// `connect_agent_body` yang benar meng-`.await` `state.close()` —
+    /// yang menunggu proses anaknya benar-benar direap
+    /// (`agent-client-protocol-2.0.0/src/acp_agent.rs:489-503`,
+    /// `wait_for_child`) — **sebelum** memanggil `connect()` yang kedua sama
+    /// sekali. Jadi begitu panggilan kedua ini kembali, sedikitnya 300ms sudah
+    /// lewat sejak stdin lama ditutup, dan proses lama itu **pasti** sudah
+    /// mati — diperiksa tanpa jeda tambahan pun tetap benar, karena 300ms itu
+    /// jauh melebihi baik latensi reap sungguhan (order milidetik, terukur
+    /// terpisah) maupun waktu yang dibutuhkan `connect()` + `session/new`
+    /// kedua (juga order milidetik untuk stub lokal ini).
+    ///
+    /// Mutasi yang menghapus `state.close()` tapi membiarkan sesi lama
+    /// ditimpa di akhir fungsi **tidak pernah menunggu** proses lama sama
+    /// sekali: `connect()` kedua langsung jalan begitu dipanggil, jauh lebih
+    /// cepat dari 300ms. Jadi begitu panggilan kedua ini kembali, adapter lama
+    /// masih tertidur di tengah `time.sleep(0.3)`-nya — pasti masih hidup.
+    /// Itulah yang membedakan kedua kasus secara andal, bukan lomba kecepatan
+    /// dengan *scheduler*.
+    ///
+    /// Dua adapter palsu sungguhan (proses OS betulan lewat [`StubAdapter`]):
+    /// satu untuk `claude`, satu untuk `codex`, supaya "berpindah agen" diuji
+    /// persis seperti namanya — bukan menyambung ulang ke agen yang sama.
+    ///
+    /// Ujung test menutup sesi yang tersisa lalu memeriksa proses barunya juga
+    /// mati, membuktikan klaim kedua Task 7: tidak ada proses tertinggal
+    /// setelah berpindah agen.
+    #[tokio::test]
+    async fn menyambung_agen_kedua_menutup_agen_lama_sebelum_membuka_yang_baru() {
+        let claude = StubAdapter::new("claude-agent-acp", false, true);
+        let codex = StubAdapter::new("codex-acp", false, false);
+        let _path = RestrictedPath::new(&[claude.dir(), codex.dir()]);
+
+        let (state, _events) = state_uji();
+
+        connect_agent_body(&state, "claude".into(), &path_lookup_selalu_ada)
+            .await
+            .expect("connect pertama ke claude harus berhasil");
+        let pid_lama = claude.pid();
+        assert!(
+            masih_hidup(pid_lama),
+            "adapter claude yang baru disambung harus benar-benar berjalan"
+        );
+
+        let info_baru = connect_agent_body(&state, "codex".into(), &path_lookup_selalu_ada)
+            .await
+            .expect("connect kedua ke codex harus berhasil");
+        assert_eq!(info_baru.id, "codex");
+        let pid_baru = codex.pid();
+        assert_ne!(
+            pid_lama, pid_baru,
+            "adapter baru harus proses OS yang berbeda dari yang lama"
+        );
+
+        // Tanpa jeda tambahan di sini dengan sengaja — lihat penjelasan di
+        // atas kenapa 300ms yang sudah lewat di dalam `state.close()` (jalur
+        // benar) atau belum lewat sama sekali (jalur mutasi) sudah cukup.
+        assert!(
+            !masih_hidup(pid_lama),
+            "proses adapter claude (pid {pid_lama}) harus sudah berhenti begitu connect \
+             kedua kembali — connect_agent_body wajib menunggu penutupannya penuh, bukan \
+             sekadar menimpa sesi lama di memori dan membiarkannya mati belakangan"
+        );
+        assert!(
+            masih_hidup(pid_baru),
+            "sesi codex yang baru dibuka harus tetap hidup"
+        );
+
+        // Bersihkan sesi yang masih tersambung, lalu buktikan klaim kedua:
+        // tidak ada proses adapter yang tertinggal setelah berpindah agen.
+        let mut guard = state.session.lock().await;
+        if let Some(sesi) = guard.take() {
+            state.close(sesi.handle).await;
+        }
+        drop(guard);
+
+        assert!(
+            tunggu_mati(pid_baru, Duration::from_secs(2)).await,
+            "tidak boleh ada proses adapter yang tertinggal setelah berpindah agen"
+        );
+    }
+
+    /// Kegagalan `session/new` pada Codex wajib menyebut `codex login`, dan
+    /// pesannya wajib berbeda dari pesan biner hilang maupun pesan protokol
+    /// generik — kalau tidak, pengguna Codex yang belum login tidak belajar
+    /// apa-apa dari pemetaan ini.
+    ///
+    /// Adapternya betulan menjawab `initialize` (agar galatnya sungguh datang
+    /// dari `session/new`, bukan dari fase sebelumnya) lalu menolak
+    /// `session/new` — mensimulasikan Codex yang belum diautentikasi tanpa
+    /// menyentuh kredensial apa pun.
+    #[tokio::test]
+    async fn kegagalan_sesi_codex_menyebut_codex_login_dan_beda_dari_pesan_lain() {
+        let codex = StubAdapter::new("codex-acp", true, false);
+        let _path = RestrictedPath::new(&[codex.dir()]);
+
+        let (state, _events) = state_uji();
+
+        let galat = connect_agent_body(&state, "codex".into(), &path_lookup_selalu_ada)
+            .await
+            .expect_err("sesi yang ditolak agen harus dilaporkan sebagai galat");
+
+        assert!(galat.contains("codex login"), "dapat: {galat}");
+
+        let biner_hilang = missing_binary_message(find_agent("codex").expect("codex harus ada"));
+        assert_ne!(
+            galat, biner_hilang,
+            "pesan gagal sesi tidak boleh sama dengan pesan biner hilang"
+        );
+
+        let protokol_generik = user_message(&AcpError::HandshakeTimeout(Duration::from_secs(30)));
+        assert_ne!(
+            galat, protokol_generik,
+            "pesan gagal sesi tidak boleh sama dengan galat protokol generik"
+        );
+
+        // Tidak ada proses tertinggal: sesi yang gagal dibuat tetap wajib
+        // ditutup (lihat cabang `Err` di `connect_agent_body`). Tidak ada
+        // mutasi adversarial untuk dijaga di sini — lihat dokumentasi
+        // `tunggu_mati` untuk kenapa polling pendek tepat di tempat ini.
+        assert!(
+            tunggu_mati(codex.pid(), Duration::from_secs(2)).await,
+            "proses codex yang gagal membuat sesi tidak boleh tertinggal"
+        );
+    }
+
+    /// Pemetaan ke `codex login` khusus untuk agen Codex — bukan untuk semua
+    /// agen. Tanpa test ini, menghapus syarat `spec.id == "codex"` di
+    /// `connect_agent_body` (menerapkan pemetaan itu ke semua agen) tidak
+    /// menggagalkan test manapun.
+    #[tokio::test]
+    async fn kegagalan_sesi_agen_selain_codex_tidak_menyebut_codex_login() {
+        let claude = StubAdapter::new("claude-agent-acp", true, false);
+        let _path = RestrictedPath::new(&[claude.dir()]);
+
+        let (state, _events) = state_uji();
+
+        let galat = connect_agent_body(&state, "claude".into(), &path_lookup_selalu_ada)
+            .await
+            .expect_err("sesi yang ditolak agen harus dilaporkan sebagai galat");
+
+        assert!(!galat.contains("codex login"), "dapat: {galat}");
+
+        assert!(
+            tunggu_mati(claude.pid(), Duration::from_secs(2)).await,
+            "proses claude yang gagal membuat sesi tidak boleh tertinggal"
+        );
     }
 }
