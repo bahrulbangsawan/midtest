@@ -79,12 +79,12 @@ function ambilUrl(skrip: SkripSkenario): string | undefined {
 }
 
 /**
- * Every entry in every task's `flow` counts as one unit. Counting *all* steps rather
- * than only the `ai*` ones is deliberate: this is a cost guard, so it must round
- * towards charging more, and Midscene's flow vocabulary grows between releases — a
- * key this file has never heard of must not be free by default. The few genuinely
- * free steps (`sleep`, `javascript`, `logScreenshot`) are cheap to over-charge and
- * rare in the scenarios this server writes.
+ * Every entry in every task's `flow` reserves one *session-budget operation*. This is
+ * deliberately a bounded work guard, not a meter of raw VLM requests: a single
+ * Midscene AI operation can re-plan internally and make more than one model call.
+ * Counting *all* steps rather than only the `ai*` ones keeps new flow vocabulary from
+ * silently bypassing the guard. The few genuinely free steps (`sleep`, `javascript`,
+ * `logScreenshot`) are conservatively included too.
  *
  * The parser is Midscene's own `parseYamlScript`, the same one `runYaml` feeds, so the
  * count cannot drift from what actually executes.
@@ -201,8 +201,9 @@ function tolakLangkahTakTerbatas(langkah: unknown, iTask: number, iLangkah: numb
         'Midscene runs those steps with caching disabled, so every replay pays the vision ' +
         'model in full. Rewrite the flow as explicit steps instead — `ai`, `aiAssert`, ' +
         '`aiWaitFor` and friends, the same shape the exploration tools (act / assert / ' +
-        'query) already produce. Each of those is counted and charged individually, and ' +
-        'each one caches.',
+        'query) already produce. The guard reserves one session-budget operation for ' +
+        'each explicit flow item; eligible operations can use Midscene caching, but one ' +
+        'operation may still make multiple internal model calls while it replans.',
     );
   }
 }

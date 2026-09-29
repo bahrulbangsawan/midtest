@@ -55,20 +55,20 @@ Diverifikasi 2026-08-04 dengan menjalankan, bukan membaca dokumentasi. Sumber le
 - [ ] **Step 1: Scaffold**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 export PATH="$HOME/.cargo/bin:$PATH"
 npm create tauri-app@latest app -- --template react-ts --manager npm --yes
 ```
 
 Bila flag `--yes` tidak dikenali oleh versi CLI yang terpasang, jalankan tanpa `--yes`
-dan jawab promptnya: nama `app`, identifier `com.midscene.desktop`, frontend
+dan jawab promptnya: nama `app`, identifier `com.midtest.desktop`, frontend
 React + TypeScript, package manager npm. **Catat di laporan versi CLI dan flag yang
 benar-benar dipakai.**
 
 - [ ] **Step 2: Verifikasi build Rust**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo build 2>&1 | tail -5
 ```
@@ -79,7 +79,7 @@ memakan beberapa menit.
 - [ ] **Step 3: Verifikasi typecheck frontend**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npm install
 npx tsc --noEmit
 ```
@@ -88,7 +88,7 @@ Expected: keluar tanpa error.
 
 - [ ] **Step 4: Tambahkan artefak build ke .gitignore root**
 
-Sisipkan di `/Users/rulisme/midscene-desktop/.gitignore` setelah baris `dist/`:
+Sisipkan di `/Users/rulisme/midtest/.gitignore` setelah baris `dist/`:
 
 ```
 # Build aplikasi Tauri
@@ -102,7 +102,7 @@ Hapus baris `src-tauri/target/` yang lama bila ada, karena lokasinya kini di baw
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app .gitignore
 git commit -m "feat(app): scaffold aplikasi Tauri"
 ```
@@ -159,7 +159,7 @@ mod tests {
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test agents 2>&1 | tail -20
 ```
@@ -209,7 +209,7 @@ pub mod agents;
 - [ ] **Step 5: Jalankan test untuk memastikan lulus**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test agents 2>&1 | tail -10
 cargo clippy -- -D warnings 2>&1 | tail -5
@@ -220,7 +220,7 @@ Expected: 4 test lulus, clippy bersih.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src
 git commit -m "feat(app): registry agen ACP dan deteksi biner"
 ```
@@ -253,7 +253,7 @@ tanpa error.
 - [ ] **Step 1: Turunkan API crate yang sebenarnya**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo add agent-client-protocol@2
 cargo add tokio --features rt-multi-thread,macros,process,io-util,sync
@@ -288,8 +288,8 @@ use std::path::Path;
 
 #[tokio::test]
 async fn initialize_mengembalikan_info_agen_dan_kapabilitas() {
-    let spec = app_lib::agents::find_agent("claude").expect("agen claude harus ada");
-    let (handle, init) = app_lib::acp::connect(spec, Path::new("."))
+    let spec = midtest_lib::agents::find_agent("claude").expect("agen claude harus ada");
+    let (handle, init) = midtest_lib::acp::connect(spec, Path::new("."))
         .await
         .expect("connect harus berhasil");
 
@@ -307,12 +307,12 @@ async fn initialize_mengembalikan_info_agen_dan_kapabilitas() {
 Catatan: `agent_info_name()` dan `supports_image_prompt()` adalah **helper yang kamu
 tulis sendiri** pada tipe balasan crate (lewat extension trait atau struct pembungkus),
 supaya test tidak bergantung pada bentuk internal crate. Definisikan keduanya di
-`acp/mod.rs`. Bila nama crate untuk lib berbeda dari `app_lib`, sesuaikan dan catat.
+`acp/mod.rs`. Bila nama crate untuk lib berbeda dari `midtest_lib`, sesuaikan dan catat.
 
 - [ ] **Step 3: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --test acp_initialize 2>&1 | tail -20
 ```
@@ -354,7 +354,7 @@ pub mod acp;
 - [ ] **Step 6: Jalankan test untuk memastikan lulus**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --test acp_initialize 2>&1 | tail -15
 cargo clippy -- -D warnings 2>&1 | tail -5
@@ -374,7 +374,7 @@ perbaiki sebelum lanjut.
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri
 git commit -m "feat(app): klien ACP dengan handshake initialize"
 ```
@@ -406,7 +406,7 @@ fn akar_repo() -> PathBuf {
 
 #[test]
 fn konfigurasi_sidecar_tidak_menyertakan_field_type() {
-    let cfg = app_lib::sidecar::midscene_server(&akar_repo());
+    let cfg = midtest_lib::sidecar::midscene_server(&akar_repo());
     let json = serde_json::to_value(&cfg).unwrap();
     assert!(
         json.get("type").is_none(),
@@ -420,11 +420,11 @@ fn konfigurasi_sidecar_tidak_menyertakan_field_type() {
 
 #[tokio::test]
 async fn sesi_baru_membuat_id_sesi() {
-    let spec = app_lib::agents::find_agent("claude").unwrap();
+    let spec = midtest_lib::agents::find_agent("claude").unwrap();
     let akar = akar_repo();
-    let (handle, _init) = app_lib::acp::connect(spec, &akar).await.unwrap();
-    let servers = vec![app_lib::sidecar::midscene_server(&akar)];
-    let sid = app_lib::acp::new_session(&handle, &akar, servers).await.unwrap();
+    let (handle, _init) = midtest_lib::acp::connect(spec, &akar).await.unwrap();
+    let servers = vec![midtest_lib::sidecar::midscene_server(&akar)];
+    let sid = midtest_lib::acp::new_session(&handle, &akar, servers).await.unwrap();
     assert!(!sid.to_string().is_empty(), "sessionId tidak boleh kosong");
     handle.shutdown().await;
 }
@@ -433,7 +433,7 @@ async fn sesi_baru_membuat_id_sesi() {
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --test acp_session 2>&1 | tail -20
 ```
@@ -480,7 +480,7 @@ Implementasikan `new_session` memakai `SessionBuilder` crate: `cwd` diisi akar r
 - [ ] **Step 5: Jalankan test untuk memastikan lulus**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --test acp_session 2>&1 | tail -15
 cargo clippy -- -D warnings 2>&1 | tail -5
@@ -489,7 +489,7 @@ cargo clippy -- -D warnings 2>&1 | tail -5
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri
 git commit -m "feat(app): sesi ACP dengan sidecar Midscene terdaftar"
 ```
@@ -556,7 +556,7 @@ mod tests {
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test events 2>&1 | tail -20
 ```
@@ -624,7 +624,7 @@ Varian yang belum dipetakan **harus** menghasilkan `vec![]`, bukan panik.
 - [ ] **Step 5: Jalankan test untuk memastikan lulus**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test events 2>&1 | tail -10
 cargo clippy -- -D warnings 2>&1 | tail -5
@@ -633,7 +633,7 @@ cargo clippy -- -D warnings 2>&1 | tail -5
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri
 git commit -m "feat(app): terjemahkan session/update ACP ke event AG-UI"
 ```
@@ -710,7 +710,7 @@ mod tests {
 - [ ] **Step 4: Jalankan test**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test commands 2>&1 | tail -10
 cargo clippy -- -D warnings 2>&1 | tail -5
@@ -721,7 +721,7 @@ Expected: 3 test lulus, clippy bersih.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri
 git commit -m "feat(app): perintah prompt, streaming AG-UI, dan gerbang izin"
 ```
@@ -741,7 +741,7 @@ git commit -m "feat(app): perintah prompt, streaming AG-UI, dan gerbang izin"
 - [ ] **Step 1: Pasang dependensi**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npm install @tanstack/ai@0.42.0 @tanstack/ai-react@0.18.1
 npm install -D vitest
 ```
@@ -806,7 +806,7 @@ test('abortSignal menghentikan iterasi', async () => {
 - [ ] **Step 3: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -15
 ```
 
@@ -826,7 +826,7 @@ Detail yang wajib benar:
 - [ ] **Step 5: Jalankan test untuk memastikan lulus**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -10
 npx tsc --noEmit
 ```
@@ -836,7 +836,7 @@ Expected: 3 test lulus, typecheck bersih.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src app/package.json app/package-lock.json
 git commit -m "feat(app): connection adapter TanStack di atas event Tauri"
 ```
@@ -856,7 +856,7 @@ git commit -m "feat(app): connection adapter TanStack di atas event Tauri"
 - [ ] **Step 1: Pasang shadcn**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx shadcn@latest init --yes --base-color neutral
 npx shadcn@latest add message message-scroller marker typeset button textarea dialog
 ```
@@ -925,7 +925,7 @@ biner mana yang tidak ditemukan — jangan layar kosong.
 - [ ] **Step 5: Verifikasi typecheck dan build**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx tsc --noEmit
 npm run build
 ```
@@ -935,7 +935,7 @@ Expected: keduanya bersih.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src app/components.json app/package.json app/package-lock.json
 git commit -m "feat(app): antarmuka chat dan dialog izin"
 ```
@@ -953,7 +953,7 @@ aplikasi dan memakai langganan.
 - [ ] **Step 1: Jalankan aplikasi**
 
 ```
-! cd /Users/rulisme/midscene-desktop/app && export PATH="$HOME/.cargo/bin:$PATH" && npm run tauri dev
+! cd /Users/rulisme/midtest/app && export PATH="$HOME/.cargo/bin:$PATH" && npm run tauri dev
 ```
 
 - [ ] **Step 2: Periksa daftar berikut dan catat hasilnya**
@@ -975,7 +975,7 @@ Rekam tiap butir di atas beserta hasilnya apa adanya, termasuk yang gagal.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add docs/superpowers/notes/2026-08-04-e2e-tauri.md
 git commit -m "docs: hasil verifikasi end-to-end aplikasi Tauri"
 ```

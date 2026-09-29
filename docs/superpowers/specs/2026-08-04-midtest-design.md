@@ -1,4 +1,4 @@
-# Desain: Midscene Desktop — Agen Chat untuk Dokumentasi QA & Demo Produk
+# Desain: MidTest — Agen Chat untuk Dokumentasi QA & Demo Produk
 
 Tanggal: 2026-08-04
 

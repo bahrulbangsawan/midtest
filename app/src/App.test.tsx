@@ -61,11 +61,17 @@ const tauri = vi.hoisted(() => {
      * juga gagal di lapisan IPC).
      */
     tolakGetFullPermissionsSetelahSet: undefined as unknown,
+    appSettings: undefined as unknown,
+    addWorkspaceResult: undefined as unknown,
+    modelState: undefined as unknown,
   };
 });
 
+const nativeDialog = vi.hoisted(() => ({ open: vi.fn() }));
+
 vi.mock('@tauri-apps/api/core', () => ({ invoke: tauri.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: tauri.listen }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: nativeDialog.open }));
 
 /** Nama event yang dipakai `listen()` di seluruh berkas ini. */
 function eventYangDidengar(): Array<string> {
@@ -96,8 +102,13 @@ beforeEach(() => {
   tauri.setFullPermissionsDipanggil = false;
   tauri.tolakGetFullPermissionsSaatMount = undefined;
   tauri.tolakGetFullPermissionsSetelahSet = undefined;
+  tauri.appSettings = undefined;
+  tauri.addWorkspaceResult = undefined;
+  tauri.modelState = undefined;
+  nativeDialog.open.mockReset();
+  nativeDialog.open.mockResolvedValue(null);
 
-  tauri.invoke.mockImplementation((cmd: string) => {
+  tauri.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'connect_agent') {
       // Sengaja tertunda: jawaban `connect_agent` harus tiba *setelah* seluruh
       // rangkaian setup → cleanup → setup selesai, persis seperti di produksi
@@ -129,6 +140,18 @@ beforeEach(() => {
       return new Promise((resolve, reject) => {
         tauri.setFullPermissions = { resolve, reject };
       });
+    }
+    if (cmd === 'get_app_settings') {
+      return Promise.resolve(tauri.appSettings);
+    }
+    if (cmd === 'save_app_settings') {
+      return Promise.resolve(args?.value);
+    }
+    if (cmd === 'add_workspace') {
+      return Promise.resolve(tauri.addWorkspaceResult);
+    }
+    if (cmd === 'set_agent_model') {
+      return Promise.resolve(tauri.modelState);
     }
     return Promise.resolve(undefined);
   });
@@ -181,9 +204,10 @@ test('hasil connect_agent yang sukses sampai ke status walau melewati mount gand
   await waitFor(() => {
     expect(screen.getByText(/Tersambung/)).toBeDefined();
   });
-  // Detail agen ikut terpasang — buktinya `setAgen` juga jalan, bukan hanya
-  // `setStatus`.
-  expect(screen.getByText(/claude-agent-acp 1\.0/)).toBeDefined();
+  // Detail biner sengaja tidak diekspos lagi; identitas agen cukup terlihat
+  // dari tombol provider di composer.
+  expect(screen.getByRole('button', { name: 'Claude' })).toBeDefined();
+  expect(screen.queryByText(/claude-agent-acp 1\.0/)).toBeNull();
 
   // Dan konsekuensi yang dilihat pengguna: kotak pesannya hidup.
   const kotak = screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement;
@@ -234,15 +258,15 @@ test('memilih agen lain memanggil connect_agent dengan id baru dan menampilkan a
   });
 
   const tombolClaude = screen.getByRole('button', { name: 'Claude' });
-  const tombolCodex = screen.getByRole('button', { name: 'Codex' });
-  expect(tombolClaude.getAttribute('aria-pressed')).toBe('true');
+  fireEvent.click(tombolClaude);
+  const tombolCodex = await screen.findByRole('menuitem', { name: 'Codex' });
   expect(tombolCodex.getAttribute('aria-pressed')).toBe('false');
 
   fireEvent.click(tombolCodex);
 
   // Berpindah tidak pernah diam-diam: status kembali ke "menyambung" seketika.
   expect(screen.getByText('Menyambungkan…')).toBeDefined();
-  expect(tombolCodex.hasAttribute('disabled')).toBe(true);
+  expect(screen.queryByRole('menuitem', { name: 'Codex' })).toBeNull();
 
   const panggilanConnect = tauri.invoke.mock.calls.filter(
     (panggilan) => panggilan[0] === 'connect_agent',
@@ -260,14 +284,9 @@ test('memilih agen lain memanggil connect_agent dengan id baru dan menampilkan a
 
   await waitFor(() => {
     expect(screen.getByText(/Tersambung/)).toBeDefined();
-    expect(screen.getByText(/codex-acp 1\.0/)).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Codex' })).toBeDefined();
   });
-  expect(
-    screen.getByRole('button', { name: 'Codex' }).getAttribute('aria-pressed'),
-  ).toBe('true');
-  expect(
-    screen.getByRole('button', { name: 'Claude' }).getAttribute('aria-pressed'),
-  ).toBe('false');
+  expect(screen.queryByText(/codex-acp 1\.0/)).toBeNull();
 });
 
 /** Kegagalan saat berpindah agen tampil apa adanya, bukan diam-diam mengklaim agen lama masih aktif. */
@@ -278,7 +297,8 @@ test('kegagalan saat berpindah agen menampilkan pesan dan tidak lagi mengklaim a
     expect(screen.getByText(/Tersambung/)).toBeDefined();
   });
 
-  fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Claude' }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Codex' }));
 
   const PESAN_CODEX_LOGIN =
     'Codex menolak membuka sesi: authentication required. Kemungkinan besar ' +
@@ -490,4 +510,200 @@ test('set_full_permissions dan pembacaan ulang get_full_permissions berdua gagal
   // hanya karena pembacaan ulang juga gagal.
   const semuaAlert = screen.getAllByRole('alert');
   expect(semuaAlert.some((el) => el.textContent === PESAN_GALAT_RUST)).toBe(true);
+});
+
+test('sidebar membuka Settings dan dapat kembali ke thread aktif', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  expect(screen.getByRole('heading', { name: 'General' })).toBeDefined();
+  fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
+  expect(screen.getByText('Agent default')).toBeDefined();
+  fireEvent.click(screen.getByRole('button', { name: 'Workspace' }));
+  expect(screen.getByText('/tmp/proyek')).toBeDefined();
+
+  fireEvent.click(screen.getByRole('button', { name: 'New thread' }));
+  expect(screen.getByLabelText('Pesan untuk agen')).toBeDefined();
+});
+
+test('sidebar dapat dilipat dan dibuka kembali tanpa menghilangkan workspace', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => {
+    expect(screen.getByText(/Tersambung/)).toBeDefined();
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Tutup sidebar' }));
+  expect(screen.getByRole('button', { name: 'Open MidTest sidebar' })).toBeDefined();
+  expect(screen.getByLabelText('Pesan untuk agen')).toBeDefined();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Open MidTest sidebar' }));
+  expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
+});
+
+test('save preferensi berurutan dan respons lama tidak mengembalikan state UI', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+
+  const pending: Array<{
+    resolve: (value: unknown) => void;
+    reject: (reason: unknown) => void;
+    value: unknown;
+  }> = [];
+  tauri.invoke.mockImplementation((command: string, args?: { value?: unknown }) => {
+    if (command === 'save_app_settings') {
+      return new Promise((resolve, reject) => {
+        pending.push({ resolve, reject, value: args?.value });
+      });
+    }
+    return Promise.resolve(undefined);
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Tutup sidebar' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open MidTest sidebar' }));
+
+  await waitFor(() => expect(pending).toHaveLength(1));
+  expect((pending[0]?.value as { sidebarCollapsed?: boolean }).sidebarCollapsed).toBe(true);
+
+  pending[0]?.resolve(pending[0].value);
+  await waitFor(() => expect(pending).toHaveLength(2));
+  expect((pending[1]?.value as { sidebarCollapsed?: boolean }).sidebarCollapsed).toBe(false);
+
+  // Resolving the old request must not fold the sidebar again while the newer
+  // snapshot waits in the persistence queue.
+  expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
+  pending[1]?.resolve(pending[1].value);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined());
+});
+
+test('membatalkan native folder picker tidak menambah workspace dan tidak menampilkan galat', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+
+  nativeDialog.open.mockResolvedValueOnce(null);
+  fireEvent.click(screen.getByRole('button', { name: 'Add project folder' }));
+
+  await waitFor(() => expect(nativeDialog.open).toHaveBeenCalledTimes(1));
+  expect(tauri.invoke.mock.calls.some((call) => call[0] === 'add_workspace')).toBe(false);
+});
+
+test('folder pilihan native divalidasi backend, disimpan, lalu dipakai untuk sesi agen berikutnya', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+
+  nativeDialog.open.mockResolvedValueOnce('/tmp/project-baru');
+  tauri.addWorkspaceResult = {
+    added: true,
+    settings: {
+      fullPermissions: false,
+      workspaces: [{
+        path: '/tmp/project-baru',
+        name: 'project-baru',
+        threads: [{ id: 'thread-main', title: 'New thread' }],
+        selectedThreadId: 'thread-main',
+      }],
+      selectedWorkspace: '/tmp/project-baru',
+      defaultProvider: 'claude',
+      selectedModels: {},
+      sidebarCollapsed: false,
+      uiScale: 'comfortable',
+    },
+  };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add project folder' }));
+
+  await waitFor(() => {
+    expect(tauri.invoke).toHaveBeenCalledWith('add_workspace', { path: '/tmp/project-baru' });
+    const connects = tauri.invoke.mock.calls.filter((call) => call[0] === 'connect_agent');
+    expect(connects[connects.length - 1]?.[1]).toEqual({
+      agentId: 'claude',
+      workspacePath: '/tmp/project-baru',
+    });
+  });
+  expect(screen.getByText('Workspace added.')).toBeDefined();
+});
+
+test('melupakan workspace terakhir menutup sesi agen yang masih aktif', async () => {
+  tauri.appSettings = {
+    fullPermissions: false,
+    workspaces: [{
+      path: '/tmp/project-tunggal',
+      name: 'project-tunggal',
+      threads: [{ id: 'thread-main', title: 'New thread' }],
+      selectedThreadId: 'thread-main',
+    }],
+    selectedWorkspace: '/tmp/project-tunggal',
+    defaultProvider: 'claude',
+    selectedModels: {},
+    sidebarCollapsed: false,
+    uiScale: 'comfortable',
+  };
+
+  await renderDalamStrictMode();
+  tauri.connect?.resolve({ ...INFO_AGEN, cwd: '/tmp/project-tunggal' });
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+
+  const actions = screen.getByRole('button', { name: 'Project actions for project-tunggal' });
+  fireEvent.pointerDown(actions, { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Forget project' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Forget project' }));
+
+  await waitFor(() => {
+    expect(tauri.invoke).toHaveBeenCalledWith('disconnect_agent');
+  });
+  expect(screen.getByText('No workspace is open. Add a folder to continue.')).toBeDefined();
+});
+
+test('model dari ACP dapat diubah lewat Settings dan pilihan baru disimpan', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve({
+    ...INFO_AGEN,
+    models: [
+      { id: 'sonnet', label: 'Claude Sonnet' },
+      { id: 'opus', label: 'Claude Opus' },
+    ],
+    selectedModel: 'sonnet',
+    supportsModelSelection: true,
+  });
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+  tauri.modelState = {
+    models: [
+      { id: 'sonnet', label: 'Claude Sonnet' },
+      { id: 'opus', label: 'Claude Opus' },
+    ],
+    selectedModel: 'opus',
+    supportsModelSelection: true,
+  };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Agents' }));
+  const modelSelect = await screen.findByLabelText('Default model') as HTMLSelectElement;
+  fireEvent.change(modelSelect, { target: { value: 'opus' } });
+
+  await waitFor(() => {
+    expect(tauri.invoke).toHaveBeenCalledWith('set_agent_model', { modelId: 'opus' });
+    expect(modelSelect.value).toBe('opus');
+  });
+  const saves = tauri.invoke.mock.calls.filter((call) => call[0] === 'save_app_settings');
+  expect(saves.some((call) => (call[1] as { value?: { selectedModels?: Record<string, string> } })?.value?.selectedModels?.claude === 'opus')).toBe(true);
+});
+
+test('keadaan sidebar tersimpan saat dilipat', async () => {
+  await renderDalamStrictMode();
+  tauri.connect?.resolve(INFO_AGEN);
+  await waitFor(() => expect(screen.getByText(/Tersambung/)).toBeDefined());
+
+  fireEvent.click(screen.getByRole('button', { name: 'Tutup sidebar' }));
+
+  await waitFor(() => {
+    const saves = tauri.invoke.mock.calls.filter((call) => call[0] === 'save_app_settings');
+    expect(saves.some((call) => (call[1] as { value?: { sidebarCollapsed?: boolean } })?.value?.sidebarCollapsed === true)).toBe(true);
+  });
 });

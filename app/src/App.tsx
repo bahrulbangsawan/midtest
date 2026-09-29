@@ -1,478 +1,496 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState } from 'react';
 
-import { Chat } from './components/Chat';
 import { PermissionDialog } from './components/PermissionDialog';
+import { WorkspaceShell } from './components/WorkspaceShell';
+import {
+  DEFAULT_SETTINGS,
+  normalizeSettings,
+  type AddWorkspaceResult,
+  type AgentInfo,
+  type AppSettings,
+  type ConnectionStatus,
+  type ModelState,
+  type PermissionState,
+  type ProviderId,
+  type ThreadPreference,
+} from './lib/app-types';
 
-/** Nama event Tauri yang mengabarkan transport agen tertutup di luar kehendak kita. */
 const EVENT_AGENT_DISCONNECTED = 'agent-disconnected';
 
-/**
- * Agen yang bisa dipilih pengguna di jendela ini.
- *
- * Sengaja hanya `id`/`label`: nama biner adapter dan paket npm-nya cuma dan
- * pernah didefinisikan di `agents.rs` (lihat `AgentSpec` dan
- * `missing_binary_message`). `connect_agent` sudah mengembalikan kalimat
- * galat lengkap — termasuk nama biner dan cara memasangnya — sehingga tidak
- * ada lagi salinan itu untuk ditempelkan di sini.
- */
-const AGEN_TERSEDIA = [
-  { id: 'claude', label: 'Claude' },
-  { id: 'codex', label: 'Codex' },
-] as const;
-
-/** Agen yang disambungkan otomatis saat jendela pertama kali dibuka. */
-const AGEN_BAWAAN = AGEN_TERSEDIA[0];
-
-/** Bentuk `AgentInfo` dari `commands.rs`, diserialisasi camelCase. */
-interface AgentInfo {
-  id: string;
-  label: string;
-  name: string;
-  sessionId: string;
-  threadId: string;
-  cwd: string;
-  supportsImagePrompt: boolean;
-}
-
-type StatusKoneksi = 'menyambung' | 'tersambung' | 'gagal';
-
-function labelStatus(status: StatusKoneksi): string {
+function connectionLabel(status: ConnectionStatus): string {
   if (status === 'menyambung') return 'Menyambungkan…';
   if (status === 'tersambung') return 'Tersambung';
   return 'Gagal tersambung';
 }
 
-/**
- * Keadaan mode izin penuh sebagaimana diketahui frontend.
- *
- * Sengaja tiga nilai, bukan `boolean`. Temuan tinjauan pra-gabung yang
- * memicu berkas ini: `get_full_permissions` dan `set_full_permissions` bisa
- * gagal di lapisan IPC itu sendiri — bukan `Err` yang dikembalikan Rust,
- * tapi kegagalan transport sebelum perintahnya sempat berjalan sama sekali
- * (jendela tertutup separuh, sidecar belum siap, dsb). Pada kegagalan itu
- * frontend sungguh tidak tahu apakah flag di memori Rust sedang menyala atau
- * mati; Rust sendiri boleh jadi masih menyetujui setiap permintaan izin
- * otomatis. Menjatuhkan kegagalan itu ke `'mati'` (persis yang dilakukan
- * `boolean` lama lewat nilai bawaan `false`-nya) berarti pil amber penanda
- * satu-satunya di header — lihat header di bawah — lenyap padahal
- * persetujuan otomatis sungguhan mungkin masih berjalan. Itulah arah yang
- * tidak boleh pernah terjadi pada kendali ini: "tidak tahu" wajib tampak
- * sebagai "tidak tahu", bukan diam-diam sebagai "aman".
- */
-type KeadaanIzinPenuh = 'nyala' | 'mati' | 'tidak-diketahui';
+function readableError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'An unexpected application error occurred.';
+}
+
+function normalizeAgent(info: AgentInfo): AgentInfo {
+  return {
+    ...info,
+    models: Array.isArray(info.models) ? info.models : [],
+    selectedModel: info.selectedModel ?? null,
+    supportsModelSelection: info.supportsModelSelection ?? false,
+  };
+}
+
+function newThread(): ThreadPreference {
+  return {
+    id: globalThis.crypto?.randomUUID?.() ?? `thread-${Date.now()}`,
+    title: 'New thread',
+  };
+}
 
 function App() {
-  const [status, setStatus] = useState<StatusKoneksi>('menyambung');
-  const [agen, setAgen] = useState<AgentInfo | null>(null);
-  const [galat, setGalat] = useState<string | null>(null);
-  const [terputus, setTerputus] = useState<string | null>(null);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const settingsRef = useRef(settings);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [status, setStatus] = useState<ConnectionStatus>('menyambung');
+  const [agent, setAgent] = useState<AgentInfo | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [disconnected, setDisconnected] = useState<string | null>(null);
+  const [applicationError, setApplicationError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [openingWorkspace, setOpeningWorkspace] = useState(false);
+  const [changingModel, setChangingModel] = useState(false);
+  const settingsPersistenceQueue = useRef<Promise<void>>(Promise.resolve());
+  const settingsPersistenceVersion = useRef(0);
 
-  const [izinPenuh, setIzinPenuh] = useState<KeadaanIzinPenuh>('mati');
-  const [izinPenuhGalat, setIzinPenuhGalat] = useState<string | null>(null);
-  const [sedangMengubahIzin, setSedangMengubahIzin] = useState(false);
+  const [permission, setPermissionState] = useState<PermissionState>('mati');
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [changingPermission, setChangingPermission] = useState(false);
 
-  /**
-   * Sambungkan (atau pindahkan) sesi ke `agentId`.
-   *
-   * Satu-satunya jalur yang memanggil `connect_agent` — dipakai baik oleh
-   * penyambungan awal maupun oleh pemilih agen — supaya perilakunya tidak
-   * pernah bercabang jadi dua salinan yang diam-diam berbeda.
-   *
-   * Berpindah tidak pernah diam-diam: status berubah ke "menyambung" seketika
-   * dipanggil (agen yang lama dilepas dari layar sampai kita tahu hasilnya),
-   * dan galat sebelumnya dibuang supaya tidak nyangkut dari percobaan lama.
-   * Rust sendiri sudah menutup sesi lama sebelum membuka yang baru — lihat
-   * `connect_agent_body` di `commands.rs` — jadi baik sambungan ini berhasil
-   * maupun gagal, sesi lama sudah pasti tidak lagi hidup.
-   */
-  function sambungKe(agentId: string) {
+  useEffect(() => {
+    settingsRef.current = settings;
+    document.documentElement.dataset.uiScale = settings.uiScale;
+  }, [settings]);
+
+  async function connectTo(
+    provider: ProviderId,
+    workspacePath?: string | null,
+    preferredModel?: string | null,
+  ) {
     setStatus('menyambung');
-    setAgen(null);
-    setGalat(null);
-    setTerputus(null);
+    setAgent(null);
+    setConnectionError(null);
+    setDisconnected(null);
 
-    invoke<AgentInfo>('connect_agent', { agentId }).then(
-      (info) => {
-        setAgen(info);
-        setStatus('tersambung');
-      },
-      (penyebab: unknown) => {
-        setStatus('gagal');
-        // Rust sudah merangkai kalimat lengkap — termasuk nama biner dan cara
-        // memasangnya bila itu sebabnya (lihat `missing_binary_message` di
-        // `agents.rs`). Tampilkan apa adanya; menambal di sini berarti dua
-        // sumber kebenaran untuk satu nama biner.
-        setGalat(String(penyebab));
-      },
-    );
-  }
-
-  /**
-   * Nyalakan/matikan mode izin penuh, sesuai nilai kebalikan dari yang
-   * sedang tampil.
-   *
-   * # Kontrak `set_full_permissions`: perubahan di memori Rust selalu
-   *   berlaku, termasuk saat hasilnya `Err`
-   *
-   * Ini menyimpang dari konvensi biasa ("gagal, jadi kembalikan tombolnya").
-   * Rollback di sini justru berbahaya: `Err` hanya berarti gagal *disimpan
-   * ke disk* — flag di memori Rust sudah berubah lebih dulu, tanpa syarat
-   * (lihat `apply_and_persist_full_permissions` di `commands.rs`). Menampilkan
-   * nilai sebelum tombol ditekan setelah `Err` berarti layar bilang "mati"
-   * sementara persetujuan otomatis sungguhan tetap *menyala* untuk sisa sesi
-   * — kebohongan UI tepat pada kendali yang paling tidak boleh berbohong.
-   *
-   * Jadi: set optimis dulu (nilai barunya memang yang berlaku di memori
-   * seketika `set_full_permissions` dipanggil), dan bila `Err`, baca ulang
-   * `get_full_permissions()` alih-alih menebak — itulah satu-satunya sumber
-   * kebenaran tentang apa yang sungguh berlaku sekarang. Pesan galatnya
-   * sendiri sudah dirangkai Rust sesuai arah perubahan (lihat
-   * `persist_failure_message`) dan ditampilkan apa adanya, sama seperti
-   * `galat` koneksi di atas.
-   *
-   * # Saat pembacaan ulang itu SENDIRI gagal
-   *
-   * Ini beda dari `Err` yang dikembalikan `set_full_permissions`. Jaminan
-   * kontrak Rust ("flag memori sudah berubah tanpa syarat") hanya berlaku
-   * untuk `Err` yang sungguh datang dari perintah itu berjalan. Bila
-   * `get_full_permissions()` gagal di lapisan IPC (perintahnya sendiri tidak
-   * sempat berjalan), tidak ada jaminan apa pun tentang keadaan sungguhan —
-   * nilai optimis di atas cuma tebakan yang kebetulan pernah benar sesaat.
-   * Menampilkannya sebagai kebenaran final berarti persis kegagalan yang
-   * memicu berkas ini: pengguna klik "matikan", kedua panggilan gagal di
-   * transport, dan layar bilang "mati" sementara Rust tetap menyetujui
-   * segalanya. Jadi jatuhkan ke `'tidak-diketahui'`, bukan nilai optimis dan
-   * bukan nilai sebelum tombol ditekan.
-   */
-  async function ubahIzinPenuh() {
-    if (sedangMengubahIzin) return;
-    // Tidak terdefinisi untuk keadaan 'tidak-diketahui': lihat tombolnya di
-    // JSX, sengaja dimatikan pada keadaan itu karena "kebalikan dari yang
-    // tidak diketahui" tidak punya arti untuk dikirim ke Rust.
-    if (izinPenuh === 'tidak-diketahui') return;
-    const nilaiBaru: KeadaanIzinPenuh = izinPenuh === 'nyala' ? 'mati' : 'nyala';
-
-    setSedangMengubahIzin(true);
-    setIzinPenuhGalat(null);
-    setIzinPenuh(nilaiBaru);
+    const args: Record<string, unknown> = { agentId: provider };
+    if (workspacePath) args.workspacePath = workspacePath;
+    if (preferredModel) args.preferredModel = preferredModel;
 
     try {
-      await invoke('set_full_permissions', { enabled: nilaiBaru === 'nyala' });
-    } catch (penyebab) {
-      try {
-        const nyata = await invoke<boolean>('get_full_permissions');
-        setIzinPenuh(nyata ? 'nyala' : 'mati');
-      } catch {
-        // Pembacaan ulang pun gagal lewat lapisan IPC — lihat penjelasan di
-        // atas kenapa nilai optimis tidak lagi bisa dipakai di sini.
-        setIzinPenuh('tidak-diketahui');
+      const info = normalizeAgent(await invoke<AgentInfo>('connect_agent', args));
+      setAgent(info);
+      setStatus('tersambung');
+
+      // If a previously saved model disappeared, the live adapter's default
+      // is authoritative and becomes the next persisted choice.
+      if (info.selectedModel) {
+        const current = settingsRef.current;
+        if (current.selectedModels[provider] !== info.selectedModel) {
+          const next = {
+            ...current,
+            selectedModels: {
+              ...current.selectedModels,
+              [provider]: info.selectedModel,
+            },
+          };
+          setSettings(next);
+          settingsRef.current = next;
+          void persistSettings(next);
+        }
       }
-      setIzinPenuhGalat(String(penyebab));
-    } finally {
-      setSedangMengubahIzin(false);
+    } catch (error) {
+      setStatus('gagal');
+      setConnectionError(readableError(error));
     }
   }
 
-  // StrictMode menjalankan efek dua kali di mode pengembangan. `connect_agent`
-  // menutup sesi lama sebelum membuka yang baru, jadi memanggilnya dua kali
-  // tetap benar — tapi berarti men-spawn proses adapter dua kali untuk satu
-  // jendela. Ref-nya bertahan melintasi mount ganda itu (fiber-nya sama), jadi
-  // cukup untuk menahan panggilan kedua.
-  const sudahMenyambung = useRef(false);
+  function persistSettings(value: AppSettings): Promise<boolean> {
+    const version = ++settingsPersistenceVersion.current;
+    const persist = async (): Promise<boolean> => {
+      try {
+        const saved = normalizeSettings(
+          await invoke<AppSettings>('save_app_settings', { value }),
+        );
+        // Only the newest snapshot may reconcile React state. Older saves
+        // still finish first in the queue, but must never roll the UI back.
+        if (version === settingsPersistenceVersion.current) {
+          setSettings(saved);
+          settingsRef.current = saved;
+          setApplicationError(null);
+        }
+        return true;
+      } catch (error) {
+        if (version === settingsPersistenceVersion.current) {
+          setApplicationError(readableError(error));
+        }
+        return false;
+      }
+    };
 
+    const queued = settingsPersistenceQueue.current.then(persist, persist);
+    settingsPersistenceQueue.current = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  function commitSettings(value: AppSettings) {
+    setSettings(value);
+    settingsRef.current = value;
+    void persistSettings(value);
+  }
+
+  function replaceSettings(value: AppSettings) {
+    const normalized = normalizeSettings(value);
+    setSettings(normalized);
+    settingsRef.current = normalized;
+    // A settings mutation made by another backend command (for example saving
+    // the Midscene key) becomes the final queued snapshot, so an older UI save
+    // cannot overwrite it after the command returns.
+    void persistSettings(normalized);
+  }
+
+  const initialized = useRef(false);
   useEffect(() => {
-    if (sudahMenyambung.current) return;
-    sudahMenyambung.current = true;
+    if (initialized.current) return;
+    initialized.current = true;
 
-    // Sengaja tanpa bendera `dibatalkan` dan tanpa fungsi cleanup, tidak
-    // seperti efek `listen` di bawahnya.
-    //
-    // Bendera semacam itu mengikat hasil sebuah promise pada umur satu
-    // *pemanggilan* efek. Di sini kepemilikannya justru bukan per-pemanggilan:
-    // ref di atas membuat `connect_agent` dipanggil tepat sekali per fiber,
-    // jadi promise-nya milik komponen, bukan milik setup yang kebetulan
-    // menembakkannya. StrictMode (setup → cleanup → setup) memutus dua hal itu
-    // dan bendera tadi menelan hasilnya: cleanup #1 membatalkan satu-satunya
-    // closure yang memegang promise, sementara setup #2 berhenti di ref dan
-    // tidak pernah memasang penerima baru. Yang tersisa: Rust sudah tersambung,
-    // sesi sudah dibuat, sidecar sudah jalan — dan jendelanya diam di
-    // "Menyambungkan…" selamanya, dengan kegagalan yang sungguhan pun tampak
-    // sama persis.
-    //
-    // Menaikkan bendera itu ke sebuah ref yang dibersihkan setup #2 juga
-    // menutup bug-nya, tapi mempertahankan pembatalan yang tidak menjaga
-    // apa-apa: sejak React 18, `setState` pada komponen yang sudah dilepas
-    // hanyalah no-op, bukan kebocoran dan bukan peringatan. Jadi yang benar di
-    // sini adalah membuang mekanismenya, bukan menambal mekanismenya.
-    //
-    // Efek `listen` di bawah tetap memakai idiom itu dan memang harus: ia tidak
-    // punya ref penjaga, jadi setup #2 memasangnya ulang — dan cleanup-nya
-    // melepas pendengar Tauri sungguhan, yang bukan no-op.
-    sambungKe(AGEN_BAWAAN.id);
+    void (async () => {
+      let loaded = DEFAULT_SETTINGS;
+      try {
+        loaded = normalizeSettings(await invoke<AppSettings>('get_app_settings'));
+      } catch (error) {
+        setApplicationError(
+          `Preferences could not be loaded. Defaults are active for this session. ${readableError(error)}`,
+        );
+      }
+      setSettings(loaded);
+      settingsRef.current = loaded;
+      setSettingsReady(true);
+      await connectTo(
+        loaded.defaultProvider,
+        loaded.selectedWorkspace,
+        loaded.selectedModels[loaded.defaultProvider],
+      );
+    })();
   }, []);
 
-  // Baca keadaan izin penuh yang sungguh berlaku (bertahan lintas peluncuran
-  // lewat berkas pengaturan) begitu jendela dibuka — lihat brief Task 8, butir
-  // 1. Bawaan `'mati'` di atas hanya berlaku sampai jawaban ini tiba — jendela
-  // yang baru saja dibuka belum sempat menanyakan apa pun, jadi tidak ada
-  // bacaan sebelumnya untuk ditampilkan; ini murni jeda singkat sebelum
-  // panggilan di bawah selesai, sama seperti `agen` yang mulai dari `null`.
-  //
-  // Wajib ada cabang penolakan (temuan tinjauan pra-gabung yang memicu
-  // berkas ini): `get_full_permissions` bisa gagal di lapisan IPC itu sendiri
-  // sebelum perintahnya sempat berjalan sama sekali — beda dari `Err` yang
-  // dikembalikan Rust. Tanpa cabang ini, kegagalan itu meninggalkan keadaan
-  // di `'mati'` selamanya sementara flag di memori Rust mungkin sungguh
-  // menyala dan menyetujui semua permintaan izin secara otomatis — persis
-  // arah yang tidak boleh pernah terjadi pada kendali ini. Jatuhkan ke
-  // `'tidak-diketahui'`, bukan diam-diam dibiarkan seperti `'mati'`.
-  //
-  // Tanpa ref penjaga dan tanpa bendera `dibatalkan`, tidak seperti
-  // `sambungKe`: `get_full_permissions` murni membaca, tidak men-spawn apa
-  // pun, jadi StrictMode memanggilnya dua kali tidak berakibat apa-apa selain
-  // dua pembacaan yang sama (sukses maupun gagal). `setState` pada komponen
-  // yang sudah dilepas pun sekadar no-op sejak React 18 — lihat catatan
-  // panjang di efek `sambungKe`.
   useEffect(() => {
     invoke<boolean>('get_full_permissions').then(
-      (nilai) => {
-        setIzinPenuh(nilai ? 'nyala' : 'mati');
-      },
-      () => {
-        setIzinPenuh('tidak-diketahui');
-      },
+      (value) => setPermissionState(value ? 'nyala' : 'mati'),
+      () => setPermissionState('tidak-diketahui'),
     );
   }, []);
 
   useEffect(() => {
-    let dibatalkan = false;
-    let lepas: (() => void) | undefined;
-
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
     listen(EVENT_AGENT_DISCONNECTED, (event) => {
-      const alasan = (event.payload as { reason?: unknown } | null)?.reason;
-      setTerputus(
-        typeof alasan === 'string' ? alasan : 'transport agen tertutup',
+      const reason = (event.payload as { reason?: unknown } | null)?.reason;
+      setDisconnected(
+        typeof reason === 'string' ? reason : 'the agent transport closed unexpectedly',
       );
       setStatus('gagal');
     }).then(
       (stop) => {
-        if (dibatalkan) stop();
-        else lepas = stop;
+        if (cancelled) stop();
+        else unlisten = stop;
       },
-      () => {
-        // Tidak ada yang berguna untuk ditampilkan: kegagalan mendaftar
-        // pendengar ini hanya berarti kabar putusnya koneksi tidak sampai,
-        // dan itu sudah terlihat dari giliran yang gagal.
-      },
+      () => undefined,
     );
-
     return () => {
-      dibatalkan = true;
-      lepas?.();
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
+  async function changePermission(target: 'ask' | 'full') {
+    if (changingPermission || permission === 'tidak-diketahui') return;
+    const enabled = target === 'full';
+    if ((permission === 'nyala') === enabled) return;
+
+    setChangingPermission(true);
+    setPermissionError(null);
+    setPermissionState(enabled ? 'nyala' : 'mati');
+    try {
+      await invoke('set_full_permissions', { enabled });
+    } catch (error) {
+      try {
+        const actual = await invoke<boolean>('get_full_permissions');
+        setPermissionState(actual ? 'nyala' : 'mati');
+      } catch {
+        setPermissionState('tidak-diketahui');
+      }
+      setPermissionError(readableError(error));
+    } finally {
+      setChangingPermission(false);
+    }
+  }
+
+  async function selectProvider(provider: ProviderId) {
+    const current = settingsRef.current;
+    if (current.defaultProvider === provider && status === 'tersambung') return;
+    const next = { ...current, defaultProvider: provider };
+    setSettings(next);
+    settingsRef.current = next;
+    void persistSettings(next);
+    await connectTo(provider, next.selectedWorkspace, next.selectedModels[provider]);
+  }
+
+  async function selectModel(modelId: string) {
+    if (!agent || changingModel || agent.selectedModel === modelId) return;
+    setChangingModel(true);
+    setApplicationError(null);
+    try {
+      const state = await invoke<ModelState>('set_agent_model', { modelId });
+      setAgent((current) => current ? {
+        ...current,
+        models: state.models,
+        selectedModel: state.selectedModel,
+        supportsModelSelection: state.supportsModelSelection,
+      } : current);
+      const current = settingsRef.current;
+      const next = {
+        ...current,
+        selectedModels: { ...current.selectedModels, [agent.id]: modelId },
+      };
+      setSettings(next);
+      settingsRef.current = next;
+      void persistSettings(next);
+    } catch (error) {
+      setApplicationError(readableError(error));
+    } finally {
+      setChangingModel(false);
+    }
+  }
+
+  async function addWorkspace() {
+    if (openingWorkspace) return;
+    setOpeningWorkspace(true);
+    setApplicationError(null);
+    try {
+      const selection = await open({
+        directory: true,
+        multiple: false,
+        title: 'Open workspace folder',
+      });
+      if (selection === null) return;
+      const path = Array.isArray(selection) ? selection[0] : selection;
+      if (!path) return;
+      const result = await invoke<AddWorkspaceResult>('add_workspace', { path });
+      const next = normalizeSettings(result.settings);
+      setSettings(next);
+      settingsRef.current = next;
+      setNotice(result.added ? 'Workspace added.' : 'Workspace was already open and is now selected.');
+      await connectTo(
+        next.defaultProvider,
+        next.selectedWorkspace,
+        next.selectedModels[next.defaultProvider],
+      );
+    } catch (error) {
+      setApplicationError(readableError(error));
+    } finally {
+      setOpeningWorkspace(false);
+    }
+  }
+
+  async function selectWorkspace(path: string) {
+    const current = settingsRef.current;
+    if (current.selectedWorkspace === path && status === 'tersambung') return;
+    const next = { ...current, selectedWorkspace: path };
+    setSettings(next);
+    settingsRef.current = next;
+    void persistSettings(next);
+    await connectTo(next.defaultProvider, path, next.selectedModels[next.defaultProvider]);
+  }
+
+  async function selectThread(workspacePath: string, threadId: string) {
+    const current = settingsRef.current;
+    const workspace = current.workspaces.find((item) => item.path === workspacePath);
+    if (!workspace || workspace.selectedThreadId === threadId) return;
+    const next = {
+      ...current,
+      selectedWorkspace: workspacePath,
+      workspaces: current.workspaces.map((item) =>
+        item.path === workspacePath ? { ...item, selectedThreadId: threadId } : item,
+      ),
+    };
+    setSettings(next);
+    settingsRef.current = next;
+    void persistSettings(next);
+    await connectTo(next.defaultProvider, workspacePath, next.selectedModels[next.defaultProvider]);
+  }
+
+  async function createThread(workspacePath?: string) {
+    const current = settingsRef.current;
+    const path = workspacePath ?? current.selectedWorkspace;
+    if (!path) {
+      await addWorkspace();
+      return;
+    }
+    const thread = newThread();
+    const next = {
+      ...current,
+      selectedWorkspace: path,
+      workspaces: current.workspaces.map((workspace) =>
+        workspace.path === path
+          ? {
+              ...workspace,
+              threads: [...workspace.threads, thread],
+              selectedThreadId: thread.id,
+            }
+          : workspace,
+      ),
+    };
+    setSettings(next);
+    settingsRef.current = next;
+    void persistSettings(next);
+    await connectTo(next.defaultProvider, path, next.selectedModels[next.defaultProvider]);
+  }
+
+  function renameThread(workspacePath: string, threadId: string, title: string) {
+    const clean = title.trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!clean) return;
+    const current = settingsRef.current;
+    const next = {
+      ...current,
+      workspaces: current.workspaces.map((workspace) =>
+        workspace.path === workspacePath
+          ? {
+              ...workspace,
+              threads: workspace.threads.map((thread) =>
+                thread.id === threadId ? { ...thread, title: clean } : thread,
+              ),
+            }
+          : workspace,
+      ),
+    };
+    commitSettings(next);
+  }
+
+  function deleteThread(workspacePath: string, threadId: string) {
+    const current = settingsRef.current;
+    let shouldReconnect = false;
+    const next = {
+      ...current,
+      workspaces: current.workspaces.map((workspace) => {
+        if (workspace.path !== workspacePath) return workspace;
+        let threads = workspace.threads.filter((thread) => thread.id !== threadId);
+        if (threads.length === 0) threads = [newThread()];
+        const deletedActive = workspace.selectedThreadId === threadId;
+        if (deletedActive) shouldReconnect = current.selectedWorkspace === workspacePath;
+        return {
+          ...workspace,
+          threads,
+          selectedThreadId: deletedActive ? threads[0]?.id : workspace.selectedThreadId,
+        };
+      }),
+    };
+    commitSettings(next);
+    if (shouldReconnect) {
+      void connectTo(next.defaultProvider, workspacePath, next.selectedModels[next.defaultProvider]);
+    }
+  }
+
+  async function disconnectAgent() {
+    try {
+      await invoke('disconnect_agent');
+    } catch (error) {
+      setApplicationError(`The active agent could not be closed cleanly. ${readableError(error)}`);
+    }
+  }
+
+  function forgetWorkspace(path: string) {
+    const current = settingsRef.current;
+    const workspaces = current.workspaces.filter((workspace) => workspace.path !== path);
+    const selectedWorkspace = current.selectedWorkspace === path
+      ? workspaces[0]?.path ?? null
+      : current.selectedWorkspace;
+    const next = { ...current, workspaces, selectedWorkspace };
+    commitSettings(next);
+    if (selectedWorkspace) {
+      void connectTo(next.defaultProvider, selectedWorkspace, next.selectedModels[next.defaultProvider]);
+    } else {
+      setAgent(null);
+      setStatus('gagal');
+      setConnectionError('No workspace is open. Add a folder to continue.');
+      void disconnectAgent();
+    }
+  }
+
+  function setSidebarCollapsed(collapsed: boolean) {
+    commitSettings({ ...settingsRef.current, sidebarCollapsed: collapsed });
+  }
+
+  function setUiScale(uiScale: AppSettings['uiScale']) {
+    commitSettings({ ...settingsRef.current, uiScale });
+  }
+
+  const activeWorkspace = settings.workspaces.find(
+    (workspace) => workspace.path === settings.selectedWorkspace,
+  );
+  const activeThread = activeWorkspace?.threads.find(
+    (thread) => thread.id === activeWorkspace.selectedThreadId,
+  );
+  const combinedConnectionError = connectionError ?? (disconnected
+    ? `The ${agent?.label ?? settings.defaultProvider} connection closed: ${disconnected}.`
+    : null);
+
   return (
-    <main className="mx-auto flex h-screen max-w-3xl flex-col gap-4 p-6">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="font-heading text-lg font-medium">
-          Midscene Desktop — {agen?.label ?? AGEN_BAWAAN.label}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          <span
-            aria-hidden="true"
-            className={
-              status === 'tersambung'
-                ? 'mr-2 inline-block size-2 rounded-full bg-emerald-500'
-                : status === 'menyambung'
-                  ? 'mr-2 inline-block size-2 animate-pulse rounded-full bg-amber-500'
-                  : 'mr-2 inline-block size-2 rounded-full bg-destructive'
-            }
-          />
-          {labelStatus(status)}
-          {agen ? ` — ${agen.name} di ${agen.cwd}` : null}
-        </p>
-
-        {/*
-          Butir 4 dari brief Task 8: saat mode izin penuh menyala, penandanya
-          wajib terlihat tanpa membuka menu apa pun — bertahan lintas
-          peluncuran lewat berkas pengaturan (Task 3) berarti pengguna bisa
-          membuka jendela ini besok dalam keadaan menyetujui segalanya tanpa
-          sadar kalau penandanya disembunyikan di balik interaksi. Ditaruh di
-          header, bukan di dekat togglenya saja, supaya tetap terlihat
-          sekalipun toggle dan header nanti dipisah tata letaknya di 2b-3.
-
-          Keadaan `'tidak-diketahui'` (temuan tinjauan pra-gabung) dapat pil
-          sendiri, bukan sekadar tidak menampilkan apa-apa seperti `'mati'`:
-          diam di sini persis kebalikan dari yang boleh terjadi pada kendali
-          ini, karena Rust boleh jadi masih menyetujui semuanya otomatis.
-          `role="alert"` (bukan `role="status"` seperti pil "menyala") supaya
-          pembaca layar mengabarkannya seketika, bukan menunggu giliran fokus.
-        */}
-        {izinPenuh === 'nyala' ? (
-          <p
-            role="status"
-            className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400"
-          >
-            <span
-              aria-hidden="true"
-              className="mr-1 inline-block size-1.5 rounded-full bg-amber-500"
-            />
-            Izin penuh menyala — permintaan izin disetujui otomatis
-          </p>
-        ) : izinPenuh === 'tidak-diketahui' ? (
-          <p
-            role="alert"
-            className="rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
-          >
-            <span
-              aria-hidden="true"
-              className="mr-1 inline-block size-1.5 rounded-full bg-destructive"
-            />
-            Status izin penuh tidak diketahui — mode ini bisa saja masih
-            menyala
-          </p>
-        ) : null}
-      </header>
-
-      {/*
-        Pemilih agen. Agen yang aktif selalu terlihat lewat `aria-pressed` dan
-        gaya tombolnya — berpindah tidak pernah sesuatu yang terjadi diam-diam
-        (lihat `sambungKe`: status langsung berubah ke "menyambung" begitu
-        tombol ditekan). Tombol dimatikan selama penyambungan berlangsung
-        supaya tidak ada dua percobaan `connect_agent` yang tumpang tindih.
-        Penataan visualnya seadanya — lihat brief Task 7, penataan sungguhan
-        adalah pekerjaan 2b-3.
-      */}
-      <div role="group" aria-label="Pilih agen" className="flex flex-wrap gap-2">
-        {AGEN_TERSEDIA.map((a) => {
-          const aktif = agen?.id === a.id;
-          return (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => sambungKe(a.id)}
-              disabled={status === 'menyambung'}
-              aria-pressed={aktif}
-              className={
-                aktif
-                  ? 'rounded-md border border-primary bg-primary/10 px-3 py-1 text-sm font-medium text-primary'
-                  : 'rounded-md border border-border px-3 py-1 text-sm text-muted-foreground hover:bg-accent disabled:opacity-50'
-              }
-            >
-              {a.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/*
-        Toggle mode izin penuh (Task 3 menyimpannya, Task 8 memberinya
-        kendali). Nilainya diset optimis begitu ditekan: kontrak
-        `set_full_permissions` menjamin flag di memori Rust sudah berubah
-        seketika perintah dipanggil, terlepas dari berhasil-tidaknya
-        penyimpanan ke disk (lihat `ubahIzinPenuh` di atas) — jadi menunggu
-        jawaban dulu sebelum mengubah tampilan hanya akan membuat togglenya
-        terasa tertunda tanpa alasan. Bila jawabannya `Err`, keadaan dibaca
-        ulang dari `get_full_permissions`, bukan dikembalikan ke nilai
-        sebelumnya. Penataan visualnya seadanya, sama seperti pemilih agen di
-        atas — lihat brief Task 8, penataan sungguhan adalah pekerjaan 2b-3.
-
-        Keadaan `'tidak-diketahui'`: tombolnya sengaja DIMATIKAN, bukan
-        dibiarkan bisa ditekan dengan peringatan. Alasannya bukan estetika:
-        `ubahIzinPenuh` menghitung nilai baru sebagai kebalikan dari yang
-        tampil sekarang (`izinPenuh === 'nyala' ? 'mati' : 'nyala'`), dan
-        "kebalikan dari tidak diketahui" tidak punya arti — mengirim tebakan
-        itu ke `set_full_permissions` bisa menyalakan sesuatu yang sebetulnya
-        sudah menyala (menyimpan ulang yang sama, tidak berbahaya) atau
-        mematikan sesuatu yang pengguna kira sudah mati padahal justru
-        sedang menyala (persis kegagalan yang harus dihindari kendali ini).
-        Jalan pulih yang ditawarkan sama seperti pola putusnya koneksi di
-        bawah: tutup dan buka kembali jendela, yang memicu pembacaan mount
-        yang baru. `aria-checked="mixed"` dipakai apa adanya sebagai nilai
-        ketiga yang tidak bisa disalahartikan sebagai "mati" — ARIA baku
-        untuk `role="switch"` sebetulnya cuma mengenal true/false, tapi pil
-        di header dan galat di bawah (keduanya `role="alert"`) yang membawa
-        kabar sungguhan untuk pembaca layar; atribut ini hanya menjaga supaya
-        togglenya sendiri tidak ikut berbohong "mati".
-      */}
-      <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-        <div>
-          <p className="text-sm font-medium">Izin penuh</p>
-          <p className="text-xs text-muted-foreground">
-            {izinPenuh === 'tidak-diketahui'
-              ? 'Status sebenarnya tidak diketahui — tutup dan buka kembali jendela ini untuk memastikan.'
-              : 'Permintaan izin dari agen akan disetujui otomatis tanpa bertanya.'}
-          </p>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={
-            izinPenuh === 'nyala' ? true : izinPenuh === 'tidak-diketahui' ? 'mixed' : false
+    <>
+      <WorkspaceShell
+        settings={settings}
+        settingsReady={settingsReady}
+        agent={agent}
+        status={status}
+        statusLabel={connectionLabel(status)}
+        connectionError={combinedConnectionError}
+        applicationError={applicationError}
+        notice={notice}
+        onDismissNotice={() => setNotice(null)}
+        permission={permission}
+        permissionError={permissionError}
+        changingPermission={changingPermission}
+        changingModel={changingModel}
+        openingWorkspace={openingWorkspace}
+        onSelectProvider={(provider) => void selectProvider(provider)}
+        onSelectModel={(modelId) => void selectModel(modelId)}
+        onSetPermission={(mode) => void changePermission(mode)}
+        onAddWorkspace={() => void addWorkspace()}
+        onSelectWorkspace={(path) => void selectWorkspace(path)}
+        onForgetWorkspace={forgetWorkspace}
+        onCreateThread={(path) => void createThread(path)}
+        onSelectThread={(path, id) => void selectThread(path, id)}
+        onRenameThread={renameThread}
+        onDeleteThread={deleteThread}
+        onSidebarCollapsedChange={setSidebarCollapsed}
+        onUiScaleChange={setUiScale}
+        onBrowserChange={(browser) => commitSettings({ ...settingsRef.current, browser })}
+        onSettingsReplaced={replaceSettings}
+        onRetry={() => void connectTo(
+          settings.defaultProvider,
+          settings.selectedWorkspace,
+          settings.selectedModels[settings.defaultProvider],
+        )}
+        onFirstPrompt={(prompt) => {
+          if (activeWorkspace && activeThread?.title === 'New thread') {
+            renameThread(activeWorkspace.path, activeThread.id, prompt);
           }
-          aria-label="Izin penuh"
-          onClick={() => void ubahIzinPenuh()}
-          disabled={sedangMengubahIzin || izinPenuh === 'tidak-diketahui'}
-          className={
-            izinPenuh === 'nyala'
-              ? 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-primary transition-colors disabled:opacity-50'
-              : izinPenuh === 'tidak-diketahui'
-                ? 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted ring-2 ring-destructive/60 transition-colors disabled:opacity-50'
-                : 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-muted transition-colors disabled:opacity-50'
-          }
-        >
-          <span
-            aria-hidden="true"
-            className={
-              izinPenuh === 'nyala'
-                ? 'inline-block size-4 translate-x-4 rounded-full bg-background transition-transform'
-                : izinPenuh === 'tidak-diketahui'
-                  ? 'inline-block size-4 translate-x-2 rounded-full bg-background transition-transform'
-                  : 'inline-block size-4 translate-x-0.5 rounded-full bg-background transition-transform'
-            }
-          />
-        </button>
-      </div>
-
-      {izinPenuhGalat ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-        >
-          {izinPenuhGalat}
-        </p>
-      ) : null}
-
-      {/*
-        Paling banyak satu kabar buruk untuk satu kegagalan. Sambungan yang
-        tidak pernah jadi mengembalikan galat dari `connect_agent` dan tidak
-        mengemisikan `agent-disconnected`; menampilkan keduanya berarti
-        pengguna membaca dua kabar untuk satu peristiwa.
-      */}
-      {galat ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-        >
-          {galat}
-        </p>
-      ) : terputus ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-        >
-          Koneksi ke agen {agen?.label ?? AGEN_BAWAAN.label} terputus (
-          {terputus}). Tutup dan buka kembali jendela ini untuk menyambung
-          ulang.
-        </p>
-      ) : null}
-
-      <Chat agenTersambung={status === 'tersambung'} />
+        }}
+      />
       <PermissionDialog />
-    </main>
+    </>
   );
 }
 

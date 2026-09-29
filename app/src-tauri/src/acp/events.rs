@@ -145,6 +145,81 @@ pub fn agui_tool_call_end(run_id: &str, thread_id: &str, call_id: &str) -> Value
     json!({ "type": "TOOL_CALL_END", "runId": run_id, "threadId": thread_id, "toolCallId": call_id })
 }
 
+/// Deliver the execution outcome through the standard AG-UI result event.
+///
+/// `TOOL_CALL_END` only means that arguments are complete to TanStack AI. It
+/// does not mean execution succeeded. Sending a result with an explicit output
+/// state is what transitions the existing tool-call part, by id, to `complete`
+/// or `error` without creating a duplicate visual event.
+pub fn agui_tool_call_result(
+    run_id: &str,
+    thread_id: &str,
+    call_id: &str,
+    content: &str,
+    failed: bool,
+) -> Value {
+    json!({
+        "type": "TOOL_CALL_RESULT",
+        "runId": run_id,
+        "threadId": thread_id,
+        "messageId": format!("tool-result-{call_id}"),
+        "toolCallId": call_id,
+        "role": "tool",
+        "content": content,
+        "state": if failed { "output-error" } else { "output-available" },
+    })
+}
+
+fn tool_result_content(
+    raw_output: Option<&Value>,
+    content: Option<&impl serde::Serialize>,
+) -> String {
+    if let Some(output) = raw_output {
+        return output.to_string();
+    }
+    content
+        .and_then(|value| serde_json::to_string(value).ok())
+        .filter(|value| value != "[]")
+        .unwrap_or_else(|| json!({ "status": "completed" }).to_string())
+}
+
+fn terminal_tool_events(
+    run_id: &str,
+    thread_id: &str,
+    call_id: &str,
+    status: &ToolCallStatus,
+    raw_output: Option<&Value>,
+    content: Option<&impl serde::Serialize>,
+) -> Vec<Value> {
+    match status {
+        ToolCallStatus::Pending => vec![],
+        ToolCallStatus::InProgress => vec![agui_tool_call_end(run_id, thread_id, call_id)],
+        ToolCallStatus::Completed => {
+            let result = tool_result_content(raw_output, content);
+            vec![
+                agui_tool_call_end(run_id, thread_id, call_id),
+                agui_tool_call_result(run_id, thread_id, call_id, &result, false),
+            ]
+        }
+        ToolCallStatus::Failed => {
+            let detail = tool_result_content(raw_output, content);
+            let result = if serde_json::from_str::<Value>(&detail)
+                .ok()
+                .is_some_and(|value| value.get("error").is_some())
+            {
+                detail
+            } else {
+                json!({ "error": detail }).to_string()
+            };
+            vec![
+                agui_tool_call_end(run_id, thread_id, call_id),
+                agui_tool_call_result(run_id, thread_id, call_id, &result, true),
+            ]
+        }
+        _ => vec![],
+    }
+}
+
 /// Potongan pemikiran agen (bukan pesan): tipe event berbeda dari
 /// [`agui_text_chunk`], bentuk payload sama persis.
 ///
@@ -179,20 +254,39 @@ pub fn to_agui(update: &SessionUpdate, run_id: &str, thread_id: &str) -> Vec<Val
                 .raw_input
                 .as_ref()
                 .map_or_else(|| "{}".to_owned(), Value::to_string);
-            agui_tool_call_start(
+            let mut events = agui_tool_call_start(
                 run_id,
                 thread_id,
                 &tool_call.tool_call_id.0,
                 &tool_call.title,
                 &args_json,
-            )
+            );
+            events.extend(terminal_tool_events(
+                run_id,
+                thread_id,
+                &tool_call.tool_call_id.0,
+                &tool_call.status,
+                tool_call.raw_output.as_ref(),
+                Some(&tool_call.content),
+            ));
+            events
         }
-        SessionUpdate::ToolCallUpdate(update) => match update.fields.status {
-            Some(ToolCallStatus::Completed | ToolCallStatus::Failed) => {
-                vec![agui_tool_call_end(run_id, thread_id, &update.tool_call_id.0)]
-            }
-            _ => vec![],
-        },
+        SessionUpdate::ToolCallUpdate(update) => {
+            update
+                .fields
+                .status
+                .as_ref()
+                .map_or_else(Vec::new, |status| {
+                    terminal_tool_events(
+                        run_id,
+                        thread_id,
+                        &update.tool_call_id.0,
+                        status,
+                        update.fields.raw_output.as_ref(),
+                        update.fields.content.as_ref(),
+                    )
+                })
+        }
         _ => vec![],
     }
 }
@@ -228,7 +322,13 @@ mod tests {
 
     #[test]
     fn tool_call_jadi_start_dan_args() {
-        let ev = agui_tool_call_start("r1", "t1", "call-9", "mcp__midscene__act", "{\"instruction\":\"klik\"}");
+        let ev = agui_tool_call_start(
+            "r1",
+            "t1",
+            "call-9",
+            "mcp__midscene__act",
+            "{\"instruction\":\"klik\"}",
+        );
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0]["type"], "TOOL_CALL_START");
         assert_eq!(ev[0]["toolCallId"], "call-9");
@@ -318,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_selesai_jadi_tool_call_end() {
+    fn tool_call_selesai_jadi_end_dan_result_sukses() {
         use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
 
         let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -327,16 +427,19 @@ mod tests {
         ));
 
         let events = to_agui(&update, "r1", "t1");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], "TOOL_CALL_END");
         assert_eq!(events[0]["toolCallId"], "call-1");
+        assert_eq!(events[1]["type"], "TOOL_CALL_RESULT");
+        assert_eq!(events[1]["state"], "output-available");
+        assert_eq!(events[1]["toolCallId"], "call-1");
     }
 
     /// "Selesai" mencakup gagal, bukan cuma sukses: klien butuh tahu tool call
     /// itu berhenti dikirim update lagi supaya UI-nya berhenti berputar,
     /// terlepas dari hasilnya.
     #[test]
-    fn tool_call_gagal_juga_jadi_tool_call_end() {
+    fn tool_call_gagal_jadi_result_error_bukan_sukses() {
         use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
 
         let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -345,13 +448,16 @@ mod tests {
         ));
 
         let events = to_agui(&update, "r1", "t1");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], "TOOL_CALL_END");
         assert_eq!(events[0]["toolCallId"], "call-1");
+        assert_eq!(events[1]["type"], "TOOL_CALL_RESULT");
+        assert_eq!(events[1]["state"], "output-error");
+        assert!(events[1]["content"].as_str().unwrap().contains("error"));
     }
 
     #[test]
-    fn tool_call_belum_selesai_tidak_menghasilkan_event() {
+    fn tool_call_in_progress_mengakhiri_input_dan_masuk_status_running() {
         use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
 
         let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -359,7 +465,10 @@ mod tests {
             ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
         ));
 
-        assert_eq!(to_agui(&update, "r1", "t1"), Vec::<Value>::new());
+        let events = to_agui(&update, "r1", "t1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "TOOL_CALL_END");
+        assert_eq!(events[0]["toolCallId"], "call-1");
     }
 
     #[test]

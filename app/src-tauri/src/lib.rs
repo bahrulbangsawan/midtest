@@ -3,19 +3,15 @@ pub mod agents;
 pub mod commands;
 pub mod settings;
 pub mod sidecar;
+pub mod system;
 
 use tauri::Manager;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         // State dibangun di `setup`, bukan sebelum `Builder`, karena
         // `AppState` butuh `AppHandle` untuk mengemisikan event ke webview.
         .setup(|app| {
@@ -48,14 +44,39 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             commands::connect_agent,
+            commands::disconnect_agent,
+            commands::set_agent_model,
             commands::send_prompt,
             commands::cancel_turn,
             commands::answer_permission,
             commands::get_full_permissions,
             commands::set_full_permissions,
+            commands::get_app_settings,
+            commands::save_app_settings,
+            commands::add_workspace,
+            system::get_provider_accounts,
+            system::open_provider_login,
+            system::get_midscene_config,
+            system::save_midscene_config,
+            system::clear_midscene_api_key,
+            system::test_midscene_connection,
+            system::detect_browsers,
+            system::validate_browser_executable,
+            system::get_macos_permissions,
+            system::open_permission_settings,
+            system::request_macos_permission,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // `App::run` exits the process directly, so shutdown work placed after it
+    // would never execute. Close the ACP transport while Tauri still owns its
+    // async runtime; `AppState::shutdown` is idempotent because this event may
+    // follow an explicit workspace disconnect.
+    app.run(|handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            tauri::async_runtime::block_on(handle.state::<commands::AppState>().shutdown());
+        }
+    });
 }

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
@@ -14,6 +14,13 @@ export default defineConfig(async () => ({
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
     },
+  },
+
+  // Tauri bundles place a complete copy of the MCP runtime under
+  // `src-tauri/target`. Limit Vitest to source tests so a prior package build
+  // cannot make it execute those copied Node test files as frontend suites.
+  test: {
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

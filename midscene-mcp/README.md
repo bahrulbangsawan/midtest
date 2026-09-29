@@ -3,7 +3,7 @@
 Server MCP standalone yang membungkus [Midscene](https://midscenejs.com/) —
 library otomasi UI berbasis vision-language model (VLM). Server ini bisa
 dipakai oleh agen ACP/MCP apa pun (Codex, Claude Code, Zed, atau aplikasi
-Midscene Desktop di repo ini) untuk menjalankan skenario QA dan menyusun
+MidTest di repo ini) untuk menjalankan skenario QA dan menyusun
 dokumentasi walkthrough berbahasa Indonesia.
 
 Server tidak terikat pada aplikasi desktop ini. Ia hanya bicara MCP lewat
@@ -45,15 +45,17 @@ Variabel yang tersedia:
 | `MIDSCENE_CACHE` | Jalur lama untuk mengaktifkan cache Midscene. **Tidak lagi diperlukan** — adapter `midscene-mcp` selalu mengirim opsi `cache` modern ke Agent, jadi cache aktif tanpa variabel ini |
 | `PUPPETEER_EXECUTABLE_PATH` | Path ke binary Chrome (perlu di Apple Silicon karena Chrome bawaan Puppeteer tidak ter-sign dengan benar) |
 | `MIDSCENE_MCP_BUDGET` | Batas operasi AI per sesi eksplorasi (default 40) |
-| `MIDSCENE_MCP_ROOT` | Root repo — dipakai server untuk menentukan lokasi `scenarios/` dan `build-demo.js`, lihat catatan di bawah |
+| `MIDSCENE_MCP_ROOT` | Root kode MCP — dipakai server untuk menentukan `build-demo.js` dan default lokasi skenario, lihat catatan di bawah |
+| `MIDSCENE_MCP_DATA_DIR` | Root writable opsional untuk `scenarios/`; aplikasi desktop mengisinya agar bundle aplikasi tidak ditulisi |
 
 ## Menjalankan dari Zed atau Claude Code
 
 Daftarkan sebagai MCP server dengan `MIDSCENE_MCP_ROOT` diisi **path absolut
-ke root repo `midscene-desktop`** — bukan ke folder `midscene-mcp/` itu
-sendiri. `ScenarioStore` menyimpan skenario di `<root>/scenarios/`, dan tool
-`build_walkthrough` memanggil `<root>/build-demo.js`; keduanya diturunkan
-dari `MIDSCENE_MCP_ROOT`.
+ke root repo `midtest`** — bukan ke folder `midscene-mcp/` itu
+sendiri. Secara default `ScenarioStore` menyimpan skenario di
+`<root>/scenarios/`, dan tool `build_walkthrough` memanggil
+`<root>/build-demo.js`; keduanya diturunkan dari `MIDSCENE_MCP_ROOT`. Setel
+`MIDSCENE_MCP_DATA_DIR` bila lokasi skenario harus dipisahkan dari kode.
 
 **`--env-file` wajib ada.** Server ini tidak memakai `dotenv` dan tidak
 membaca `.env` sendiri; klien MCP juga menjalankannya sebagai proses anak
@@ -68,11 +70,11 @@ berkas yang sama yang kamu buat dengan `cp .env.example .env` di atas.
     "midscene": {
       "command": "node",
       "args": [
-        "--env-file=/absolute/path/to/midscene-desktop/.env",
-        "/absolute/path/to/midscene-desktop/midscene-mcp/src/index.ts"
+        "--env-file=/absolute/path/to/midtest/.env",
+        "/absolute/path/to/midtest/midscene-mcp/src/index.ts"
       ],
       "env": {
-        "MIDSCENE_MCP_ROOT": "/absolute/path/to/midscene-desktop"
+        "MIDSCENE_MCP_ROOT": "/absolute/path/to/midtest"
       }
     }
   }
@@ -100,7 +102,7 @@ membuat `node` gagal start bila berkasnya tidak ditemukan.
 | `end_session` | Menutup sesi yang berjalan dan melepas koneksi browser/desktop. |
 | `save_scenario` | Membekukan urutan langkah yang terbukti berhasil saat eksplorasi menjadi berkas YAML Midscene yang bisa dipakai ulang. |
 | `list_scenarios` | Menampilkan daftar nama skenario yang sudah tersimpan. |
-| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — langkah yang sudah di-cache melewati model vision sepenuhnya. Untuk target `web`, sesi lebih dulu membuka alamat yang ditulis skenario itu sendiri (`page:` / `browser:` / `web:` / `target:`), atau alamat dari argumen `url` bila diberikan. Tetap dipotong dari budget di muka: satu operasi AI per langkah `flow` di YAML-nya. Skenario yang lebih panjang dari budget ditolak `BUDGET_EXCEEDED` dan tidak dijalankan sama sekali. |
+| `run_scenario` | Memutar ulang skenario tersimpan dari awal sampai akhir dengan cache Midscene aktif — cache hit dapat melewati kerja vision. Untuk target `web`, sesi lebih dulu membuka alamat yang ditulis skenario itu sendiri (`page:` / `browser:` / `web:` / `target:`), atau alamat dari argumen `url` bila diberikan. Server memesan satu operasi *budget sesi* per langkah `flow` di muka; itu penjaga kerja terbatas, bukan hitungan mentah panggilan model karena satu operasi Midscene yang belum tercache dapat melakukan re-planning internal. Skenario yang lebih panjang dari budget ditolak `BUDGET_EXCEEDED` dan tidak dijalankan sama sekali. |
 | `build_walkthrough` | Mengubah report Midscene menjadi halaman walkthrough berbahasa Indonesia yang berdiri sendiri. |
 
 ## Alur kerja
@@ -176,8 +178,10 @@ seluruh langkah `flow` di semua task, lalu memotong sebanyak itu di muka:
   cache Midscene tidak pernah berlaku dan setiap replay membayar VLM penuh —
   ini merusak premis "replay nyaris gratis", bukan cuma plafon budget.
   Tulis alurnya sebagai langkah eksplisit (`ai`, `aiAssert`, `aiWaitFor`)
-  seperti yang memang dihasilkan tool eksplorasi; masing-masing dihitung,
-  ditagih, dan kena cache.
+  seperti yang memang dihasilkan tool eksplorasi; penjaga ini memesan satu unit
+  budget sesi per item eksplisit dan operasi yang memenuhi syarat dapat memakai
+  cache. Ini bukan hitungan mentah VLM: satu operasi Midscene dapat melakukan
+  beberapa panggilan internal saat re-planning.
 - `flow` yang ditulis sebagai **mapping** (atau string, atau dibiarkan
   kosong) ditolak juga (`SCENARIO_UNSUPPORTED`), sebelum sesi dibuka.
   `parseYamlScript` memvalidasi `tasks` harus array tapi tidak pernah

@@ -151,7 +151,7 @@ mod tests {
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test settings 2>&1 | tail -20
 ```
@@ -206,7 +206,7 @@ yang sudah ada. Jangan mengganti isi berkas.
 - [ ] **Step 5: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test settings 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
@@ -217,7 +217,7 @@ Expected: 5 test lulus, clippy bersih.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src/settings.rs app/src-tauri/src/lib.rs
 git commit -m "feat(app): penyimpanan pengaturan yang toleran terhadap berkas rusak"
 ```
@@ -301,7 +301,7 @@ sumber crate dan sesuaikan pembangun `opsi()` — jangan mengubah maksud test-ny
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test auto_permission 2>&1 | tail -20
 ```
@@ -347,7 +347,7 @@ deklarasi modul yang sudah ada di sana.
 - [ ] **Step 5: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test auto_permission 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
@@ -358,7 +358,7 @@ Expected: 5 test lulus, clippy bersih.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src/acp/auto_permission.rs app/src-tauri/src/acp/mod.rs
 git commit -m "feat(app): pemilih opsi izin untuk mode izin penuh"
 ```
@@ -403,7 +403,7 @@ yang benar-benar sampai ke sink — bukan atas keadaan internal.
 - [ ] **Step 3: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test client 2>&1 | tail -20
 ```
@@ -460,7 +460,7 @@ flag. Pengaturan yang tersimpan harus berlaku sebelum sesi pertama dibuat.
 - [ ] **Step 8: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
@@ -476,7 +476,7 @@ byte-identik dan verifikasi dengan checksum. Catat hasilnya di laporan.
 - [ ] **Step 10: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src
 git commit -m "feat(app): mode izin penuh yang tersimpan, dengan jatuh ke bertanya"
 ```
@@ -522,7 +522,7 @@ yang sama, lakukan dan catat.
 - [ ] **Step 3: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test commands 2>&1 | tail -20
 ```
@@ -544,7 +544,7 @@ Daftarkan di `invoke_handler`.
 - [ ] **Step 5: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
@@ -554,7 +554,7 @@ pgrep -fl "claude-agent-acp|midscene-mcp" | head; echo "(kosong = bersih)"
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src
 git commit -m "feat(app): perintah pembatalan giliran lewat session/cancel"
 ```
@@ -586,7 +586,7 @@ Test yang dibutuhkan:
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -15
 ```
 
@@ -605,7 +605,7 @@ pekerjaan rencana 2b-3.
 - [ ] **Step 4: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -10
 npx tsc --noEmit && echo "tsc bersih"
 npm run build 2>&1 | tail -3
@@ -614,7 +614,7 @@ npm run build 2>&1 | tail -3
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src app/package.json app/package-lock.json
 git commit -m "feat(app): tombol hentikan giliran"
 ```
@@ -648,7 +648,7 @@ closure pencari justru untuk ini.
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test commands 2>&1 | tail -20
 ```
@@ -668,17 +668,17 @@ pesan dari Rust apa adanya. Satu sumber kebenaran, di `agents.rs`.
 - [ ] **Step 5: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
-cd /Users/rulisme/midscene-desktop/app && npx tsc --noEmit && npx vitest run 2>&1 | tail -6
+cd /Users/rulisme/midtest/app && npx tsc --noEmit && npx vitest run 2>&1 | tail -6
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src app/src
 git commit -m "feat(app): deteksi biner agen sebelum menyambung"
 ```
@@ -708,7 +708,7 @@ perpindahan agen memakai jalur yang sama, bukan jalur baru yang belum teruji.
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test commands 2>&1 | tail -20
 ```
@@ -746,11 +746,11 @@ Penempatan visual seadanya; penataan adalah pekerjaan 2b-3.
 - [ ] **Step 6: Jalankan gate lengkap**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app/src-tauri
+cd /Users/rulisme/midtest/app/src-tauri
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test 2>&1 | tail -10
 cargo clippy --all-targets -- -D warnings 2>&1 | tail -5
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx tsc --noEmit && echo "tsc bersih"
 npx vitest run 2>&1 | tail -6
 npm run build 2>&1 | tail -3
@@ -760,7 +760,7 @@ pgrep -fl "claude-agent-acp|codex-acp|midscene-mcp" | head; echo "(kosong = bers
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src-tauri/src app/src
 git commit -m "feat(app): pemilih agen Codex dan Claude"
 ```
@@ -790,7 +790,7 @@ segalanya tanpa sadar.
 - [ ] **Step 2: Jalankan test untuk memastikan gagal**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -15
 ```
 
@@ -802,7 +802,7 @@ izin akan disetujui otomatis. Saat menyala, tampilkan penanda yang selalu terlih
 - [ ] **Step 4: Jalankan gate**
 
 ```bash
-cd /Users/rulisme/midscene-desktop/app
+cd /Users/rulisme/midtest/app
 npx vitest run 2>&1 | tail -10
 npx tsc --noEmit && echo "tsc bersih"
 npm run build 2>&1 | tail -3
@@ -811,7 +811,7 @@ npm run build 2>&1 | tail -3
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add app/src
 git commit -m "feat(app): toggle izin penuh yang selalu terlihat"
 ```
@@ -828,7 +828,7 @@ Dijalankan **oleh human partner**. Memakai langganan dan membuka jendela.
 - [ ] **Step 1: Jalankan aplikasi**
 
 ```
-! cd /Users/rulisme/midscene-desktop/app && export PATH="$HOME/.cargo/bin:$PATH" && npm run tauri dev
+! cd /Users/rulisme/midtest/app && export PATH="$HOME/.cargo/bin:$PATH" && npm run tauri dev
 ```
 
 - [ ] **Step 2: Periksa daftar berikut dan catat hasilnya apa adanya**
@@ -851,7 +851,7 @@ Dijalankan **oleh human partner**. Memakai langganan dan membuka jendela.
 Rekam tiap butir beserta hasilnya, termasuk yang gagal atau tidak sempat diuji.
 
 ```bash
-cd /Users/rulisme/midscene-desktop
+cd /Users/rulisme/midtest
 git add docs/superpowers/notes/2026-08-05-e2e-2b1.md
 git commit -m "docs: hasil verifikasi manual rencana 2b-1"
 ```

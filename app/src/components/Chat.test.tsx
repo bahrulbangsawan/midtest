@@ -29,6 +29,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: tauri.listen }));
  */
 const chat = vi.hoisted(() => ({
   sendMessage: vi.fn(),
+  messages: [] as Array<unknown>,
 }));
 
 vi.mock('@tanstack/ai-react', () => ({
@@ -50,7 +51,7 @@ vi.mock('@tanstack/ai-react', () => ({
     }, [options.connection, options.live]);
 
     return {
-      messages: [],
+      messages: chat.messages,
       sendMessage: chat.sendMessage,
       error: undefined,
     };
@@ -79,6 +80,7 @@ beforeEach(() => {
   tauri.invoke.mockReset();
   tauri.listen.mockReset();
   chat.sendMessage.mockReset();
+  chat.messages = [];
 
   // Pendaftaran listener selesai seketika, supaya `whenReady()` di `Chat.tsx`
   // resolve tanpa perlu langkah tambahan di setiap test.
@@ -218,4 +220,93 @@ test('cancel_turn yang selesai tidak langsung mengakhiri giliran — hanya RUN_F
     expect(screen.getByRole('button', { name: /^kirim$/i })).toBeDefined();
   });
   expect(screen.queryByRole('button', { name: /hentikan/i })).toBeNull();
+});
+
+test('composer langsung kosong setelah submit sementara pesan optimistis dan streaming masih berjalan', async () => {
+  const giliran = tunda<void>();
+  chat.sendMessage.mockReturnValue(giliran.promise);
+  const { rerender } = render(<Chat agenTersambung={true} />);
+
+  ketik('periksa halaman masuk');
+  await tungguBolehKirim();
+  fireEvent.click(screen.getByRole('button', { name: /^kirim$/i }));
+
+  await waitFor(() => {
+    expect(chat.sendMessage).toHaveBeenCalledWith('periksa halaman masuk');
+    expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  // TanStack owns the optimistic message. Simulate the message snapshot it
+  // publishes while sendMessage is still pending and prove the cleared input
+  // does not remove it.
+  chat.messages = [{
+    id: 'user-optimistic',
+    role: 'user',
+    parts: [{ type: 'text', content: 'periksa halaman masuk' }],
+  }];
+  rerender(<Chat agenTersambung={true} />);
+  expect(screen.getByText('periksa halaman masuk')).toBeDefined();
+  expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe('');
+
+  giliran.resolve();
+});
+
+test('prompt yang gagal dikembalikan ke composer bila pengguna belum membuat draft baru', async () => {
+  const giliran = tunda<void>();
+  chat.sendMessage.mockReturnValue(giliran.promise);
+  render(<Chat agenTersambung={true} />);
+
+  ketik('jangan hilangkan prompt ini');
+  await tungguBolehKirim();
+  fireEvent.click(screen.getByRole('button', { name: /^kirim$/i }));
+  await waitFor(() => {
+    expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  giliran.reject(new Error('adapter menolak prompt'));
+
+  await waitFor(() => {
+    expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe(
+      'jangan hilangkan prompt ini',
+    );
+    expect(screen.getByRole('alert').textContent).toContain('adapter menolak prompt');
+  });
+});
+
+test('kegagalan submit lama tidak menimpa draft baru yang diketik saat streaming', async () => {
+  const giliran = tunda<void>();
+  chat.sendMessage.mockReturnValue(giliran.promise);
+  render(<Chat agenTersambung={true} />);
+
+  ketik('prompt pertama');
+  await tungguBolehKirim();
+  fireEvent.click(screen.getByRole('button', { name: /^kirim$/i }));
+  await waitFor(() => {
+    expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  ketik('draft berikutnya');
+  giliran.reject(new Error('giliran pertama gagal'));
+
+  await waitFor(() => {
+    expect((screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).value).toBe(
+      'draft berikutnya',
+    );
+  });
+});
+
+test('submit beruntun pada render yang sama hanya memulai satu giliran', async () => {
+  const giliran = tunda<void>();
+  chat.sendMessage.mockReturnValue(giliran.promise);
+  render(<Chat agenTersambung={true} />);
+
+  ketik('sekali saja');
+  await tungguBolehKirim();
+  const form = (screen.getByLabelText('Pesan untuk agen') as HTMLTextAreaElement).closest('form');
+  if (!form) throw new Error('composer form tidak ditemukan');
+  fireEvent.submit(form);
+  fireEvent.submit(form);
+
+  await waitFor(() => expect(chat.sendMessage).toHaveBeenCalledTimes(1));
+  giliran.resolve();
 });

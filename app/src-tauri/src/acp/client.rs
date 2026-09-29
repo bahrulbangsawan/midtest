@@ -47,39 +47,19 @@
 //! `to_future_hack` diisi makro `on_receive_notification!()`
 //! (`src/lib.rs:197`), bukan `on_receive_request!()`.
 //!
-//! # Koreksi atas catatan Task 3: request ber-`sessionId` tanpa handler **menggantung**
+//! # Request ber-`sessionId` tanpa handler harus ditolak, bukan digantung
 //!
-//! Catatan lama modul ini menyatakan permintaan tanpa handler dibalas otomatis
-//! dengan `method not found`, jadi "agen tidak menggantung". Itu salah, dan
-//! pembeda sebenarnya bukan soal method dikenal atau tidak.
+//! Fallback bawaan ACP mencoba me-retry request tanpa handler bila `params`
+//! memuat `sessionId`. Tanpa handler terakhir, `fs/*`, `terminal/*`, atau
+//! extension agen yang belum kita implementasikan akan menunggu selamanya.
 //!
-//! Pembedanya adalah **ada tidaknya field `sessionId` di dalam `params`**.
-//! `Agent::default_handle_dispatch_from` (`src/role/acp.rs:294-313`) melakukan
-//! `let retry = message.has_session_id();`, dan `has_session_id` hanyalah
-//! `has_field("sessionId")` (`src/jsonrpc.rs:4393-4396`) — pemeriksaan field
-//! JSON mentah, bukan pengenalan method. Konsekuensinya:
-//!
-//! | Pesan | Akibat bila tak ada handler |
-//! |---|---|
-//! | method apa pun **dengan** `sessionId` | masuk antrean retry (`incoming_actor.rs:617`) menunggu handler dinamis yang tidak akan pernah ada — **tidak ada balasan** |
-//! | method apa pun **tanpa** `sessionId` | dibalas `-32601 Method not found` (`incoming_actor.rs:631`) |
-//!
-//! Jadi **setiap** request agen→klien yang berlingkup sesi — `session/*`,
-//! `fs/*`, `terminal/*`, termasuk method kustom — menggantung diam-diam bila
-//! handler-nya tidak terdaftar. `session/request_permission` selalu membawa
-//! `sessionId`, jadi ia jatuh tepat di baris pertama tabel itu.
-//!
-//! Itulah sebabnya pendaftaran gerbang izin diuji lewat kawat JSON-RPC
-//! sungguhan, bukan dengan memanggil [`refuse`] langsung: salah pasang tipe
-//! request tidak menghasilkan galat yang berisik, melainkan sesi yang membeku
-//! tanpa satu pun pesan. Ketiga baris tabel dikunci oleh test
-//! `permintaan_ber_session_id_tanpa_handler_menggantung`,
-//! `permintaan_tanpa_session_id_dibalas_method_not_found`, dan
-//! `method_dikenal_tanpa_session_id_tetap_dibalas_method_not_found`.
-//!
-//! Kaitannya dengan kapabilitas yang kita iklankan dicatat di
-//! [`super::client_capabilities`]: kita aman menangani `session/request_permission`
-//! saja **hanya karena** `fs` dan `terminal` diiklankan mati.
+//! Karena itu builder mendaftarkan `UntypedMessage` **setelah** handler
+//! `session/request_permission` yang spesifik. Ia cocok dengan setiap method
+//! sisa dan langsung membalas `-32601 Method not found`. Urutan tersebut
+//! mempertahankan gerbang izin yang sah sekaligus memastikan kapabilitas baru
+//! atau agen yang tidak patuh gagal secara eksplisit, bukan membekukan sesi.
+//! Jalur kawat ini dikunci oleh test
+//! `permintaan_ber_session_id_tanpa_handler_ditolak_tegas`.
 //!
 //! # Gerbang izin menunggu di luar dispatch loop
 //!
@@ -102,17 +82,17 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
 };
 use agent_client_protocol::{
-    Agent, Builder, Client, ConnectionTo, HandleConnectionClose, HandleDispatchFrom, Handled,
-    NullRun, Responder, on_receive_notification, on_receive_request,
+    on_receive_notification, on_receive_request, Agent, Builder, Client, ConnectionTo,
+    HandleConnectionClose, HandleDispatchFrom, Handled, NullRun, Responder, UntypedMessage,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use super::auto_permission::pick_allow;
 use super::events::to_agui;
 
 /// Nama klien yang dikirim ke agen pada `initialize`.
-pub const CLIENT_NAME: &str = "midscene-desktop";
+pub const CLIENT_NAME: &str = "midtest";
 
 /// Event Tauri yang membawa satu event AG-UI (payload `serde_json::Value`).
 pub const EVENT_AGUI: &str = "agui";
@@ -273,6 +253,16 @@ impl PermissionMap {
         self.waiters().remove(request_id);
     }
 
+    /// Buang seluruh penunggu saat sesi ditutup.
+    ///
+    /// Menjatuhkan semua sender membangunkan task gerbang izin yang masih
+    /// menunggu; task tersebut lalu mengambil jalur penolakan. Ini mencegah
+    /// dialog dari sesi lama dapat dijawab oleh sesi berikutnya, sekaligus
+    /// memastikan peta tidak menahan entri basi setelah aplikasi keluar.
+    pub fn clear(&self) {
+        self.waiters().clear();
+    }
+
     /// Berapa permintaan yang masih menunggu jawaban.
     #[must_use]
     pub fn pending_count(&self) -> usize {
@@ -412,7 +402,11 @@ impl ClientContext {
     /// frontend. Menempelkannya ke run terakhir lebih jujur daripada membuangnya.
     pub fn begin_thread(&self, thread_id: String) {
         let run_id = self.new_run_id();
-        let mut ids = self.inner.ids.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut ids = self
+            .inner
+            .ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         ids.thread_id = thread_id;
         ids.run_id = run_id;
     }
@@ -420,7 +414,11 @@ impl ClientContext {
     /// Mulai satu giliran baru dan kembalikan `(runId, threadId)`-nya.
     pub fn begin_run(&self) -> (String, String) {
         let run_id = self.new_run_id();
-        let mut ids = self.inner.ids.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut ids = self
+            .inner
+            .ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         ids.run_id.clone_from(&run_id);
         (run_id, ids.thread_id.clone())
     }
@@ -502,12 +500,7 @@ enum Decision {
 ///   [`ClientContext::arm_disconnect_notice`] sudah dipasang.
 pub fn builder(
     ctx: ClientContext,
-) -> Builder<
-    Client,
-    impl HandleDispatchFrom<Agent>,
-    NullRun,
-    impl HandleConnectionClose<Agent>,
-> {
+) -> Builder<Client, impl HandleDispatchFrom<Agent>, NullRun, impl HandleConnectionClose<Agent>> {
     let notification_ctx = ctx.clone();
     let permission_ctx = ctx.clone();
     let close_ctx = ctx;
@@ -525,6 +518,20 @@ pub fn builder(
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, cx: ConnectionTo<Agent>| {
                 permission_gate(&permission_ctx, request, responder, &cx)
+            },
+            on_receive_request!(),
+        )
+        // `UntypedMessage` cocok dengan method apa pun. Handler ini wajib
+        // dipasang *setelah* handler izin yang spesifik: request yang tidak
+        // kita implementasikan tetap menerima JSON-RPC `-32601`, termasuk
+        // request ber-`sessionId` yang oleh fallback SDK akan diantrekan ulang
+        // selamanya bila dibiarkan tanpa handler.
+        .on_receive_request(
+            async move |request: UntypedMessage, responder, _cx| {
+                responder.respond_with_error(
+                    agent_client_protocol::Error::method_not_found().data(request.method),
+                )?;
+                Ok(Handled::Yes)
             },
             on_receive_request!(),
         )
@@ -555,7 +562,10 @@ fn permission_gate(
     responder: Responder<RequestPermissionResponse>,
     cx: &ConnectionTo<Agent>,
 ) -> Result<
-    Handled<(RequestPermissionRequest, Responder<RequestPermissionResponse>)>,
+    Handled<(
+        RequestPermissionRequest,
+        Responder<RequestPermissionResponse>,
+    )>,
     agent_client_protocol::Error,
 > {
     // Mode izin penuh, sebelum apa pun yang lain: tidak ada entri peta yang
@@ -676,7 +686,7 @@ fn refuse(request: &RequestPermissionRequest) -> RequestPermissionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::testing::{FakeAgent, recording_context};
+    use crate::acp::testing::{recording_context, FakeAgent};
     use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -837,6 +847,25 @@ mod tests {
         assert_eq!(peta.pending_count(), 0, "entri harus tetap dibuang");
     }
 
+    #[tokio::test]
+    async fn menutup_peta_membangunkan_semua_penunggu() {
+        let peta = PermissionMap::default();
+        let pertama = peta.daftar("req-4".into());
+        let kedua = peta.daftar("req-5".into());
+
+        peta.clear();
+
+        assert_eq!(peta.pending_count(), 0);
+        assert!(
+            pertama.await.is_err(),
+            "sender harus dijatuhkan saat sesi tutup"
+        );
+        assert!(
+            kedua.await.is_err(),
+            "sender harus dijatuhkan saat sesi tutup"
+        );
+    }
+
     // -------------------------------------------------------- ClientContext
 
     #[tokio::test]
@@ -917,7 +946,8 @@ mod tests {
         let notifikasi = SessionNotification::new(
             "sesi-uji",
             SessionUpdate::ToolCall(
-                ToolCall::new("call-1", "midscene__act").raw_input(json!({ "instruction": "klik" })),
+                ToolCall::new("call-1", "midscene__act")
+                    .raw_input(json!({ "instruction": "klik" })),
             ),
         );
         agen.send_notification(
@@ -980,20 +1010,11 @@ mod tests {
         agen.shutdown().await;
     }
 
-    /// **Mekanisme sebenarnya**, dikoreksi dari catatan Task 3 dan dari
-    /// kesimpulan pertama saya sendiri di task ini.
-    ///
-    /// Pembeda antara "dibalas `method not found`" dan "menggantung" bukan
-    /// apakah crate mengenali method-nya, melainkan apakah `params` punya field
-    /// `sessionId`: `Agent::default_handle_dispatch_from` melakukan
-    /// `let retry = message.has_session_id()` (`src/role/acp.rs:294-313`), dan
-    /// `has_session_id` hanyalah `has_field("sessionId")` (`jsonrpc.rs:4393`).
-    ///
-    /// Method yang **sepenuhnya asing** pun menggantung asal membawa
-    /// `sessionId` — jadi kelas bahayanya jauh lebih luas daripada "method
-    /// yang kebetulan dikenal crate".
+    /// Request asing yang membawa `sessionId` harus tetap menerima jawaban.
+    /// Tanpa fallback `UntypedMessage`, SDK mengantrekannya untuk retry dan
+    /// agen akan menunggu selamanya.
     #[tokio::test]
-    async fn permintaan_ber_session_id_tanpa_handler_menggantung() {
+    async fn permintaan_ber_session_id_tanpa_handler_ditolak_tegas() {
         let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
         let mut agen = FakeAgent::start(&ctx, events).await;
 
@@ -1003,17 +1024,15 @@ mod tests {
             json!({ "sessionId": "sesi-uji" }),
         );
 
-        assert!(
-            agen.line_within(Duration::from_millis(300)).await.is_none(),
-            "request ber-sessionId tanpa handler ternyata dibalas; \
-             catatan modul soal has_session_id perlu diperbarui"
-        );
+        let balasan = agen.next_line().await;
+        assert_eq!(balasan["id"], 12);
+        assert_eq!(balasan["error"]["code"], -32601, "dapat: {balasan}");
+        assert_eq!(balasan["error"]["data"], "metode/sepenuhnya-asing");
 
         agen.shutdown().await;
     }
 
-    /// Sisi lain pembeda yang sama: tanpa `sessionId`, method asing yang persis
-    /// sama justru dibalas `-32601`.
+    /// Fallback yang sama juga membalas request asing tanpa `sessionId`.
     #[tokio::test]
     async fn permintaan_tanpa_session_id_dibalas_method_not_found() {
         let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
@@ -1023,19 +1042,14 @@ mod tests {
 
         let balasan = agen.next_line().await;
         assert_eq!(balasan["id"], 13);
-        assert_eq!(
-            balasan["error"]["code"], -32601,
-            "dapat: {balasan}"
-        );
+        assert_eq!(balasan["error"]["code"], -32601, "dapat: {balasan}");
         assert!(balasan.get("result").is_none());
 
         agen.shutdown().await;
     }
 
-    /// Dan pengenalan method memang tidak berperan: `fs/read_text_file` adalah
-    /// method peran klien yang dikenal crate, tetapi tanpa `sessionId` ia tetap
-    /// dibalas `-32601`. Inilah yang mematahkan hipotesis "dikenal vs tidak
-    /// dikenal" yang sempat saya tulis.
+    /// Bahkan method peran klien yang dikenal crate tetapi tidak kita dukung
+    /// tetap menerima `-32601`, bukan antrean retry.
     #[tokio::test]
     async fn method_dikenal_tanpa_session_id_tetap_dibalas_method_not_found() {
         let (ctx, events) = recording_context(DEFAULT_PERMISSION_TIMEOUT);
@@ -1166,8 +1180,7 @@ mod tests {
         agen.send_request(
             21,
             "session/request_permission",
-            serde_json::to_value(permintaan(opsi_hanya_penolakan()))
-                .expect("harus terserialisasi"),
+            serde_json::to_value(permintaan(opsi_hanya_penolakan())).expect("harus terserialisasi"),
         );
 
         let (nama, payload) = agen.next_event().await;

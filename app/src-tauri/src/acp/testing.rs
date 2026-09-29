@@ -19,11 +19,11 @@ use std::time::Duration;
 use agent_client_protocol::{Agent, ConnectionTo, Lines};
 use futures::channel::mpsc as futures_mpsc;
 use futures::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::client::{ClientContext, EventSink, builder};
+use super::client::{builder, ClientContext, EventSink};
 use super::AcpHandle;
 
 /// Batas kesabaran test. Cukup longgar untuk mesin yang sedang sibuk, cukup
@@ -52,7 +52,8 @@ pub(crate) fn recording_context(
     permission_timeout: Duration,
 ) -> (ClientContext, mpsc::UnboundedReceiver<(String, Value)>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let ctx = ClientContext::with_permission_timeout(Arc::new(RecordingSink { tx }), permission_timeout);
+    let ctx =
+        ClientContext::with_permission_timeout(Arc::new(RecordingSink { tx }), permission_timeout);
     ctx.begin_thread("thread-uji".into());
     (ctx, rx)
 }
@@ -80,15 +81,16 @@ impl FakeAgent {
         let (ready_tx, ready_rx) = oneshot::channel::<ConnectionTo<Agent>>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-        let runner = tokio::spawn(
-            builder(ctx.clone()).connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+        let runner = tokio::spawn(builder(ctx.clone()).connect_with(
+            transport,
+            async move |cx: ConnectionTo<Agent>| {
                 if ready_tx.send(cx).is_err() {
                     return Ok(());
                 }
                 drop(shutdown_rx.await);
                 Ok(())
-            }),
-        );
+            },
+        ));
 
         let connection = tokio::time::timeout(TEST_TIMEOUT, ready_rx)
             .await
@@ -115,7 +117,9 @@ impl FakeAgent {
         AcpHandle::from_parts(
             self.connection.clone(),
             self.shutdown_tx.take(),
-            self.runner.take().expect("runner hanya boleh diambil sekali"),
+            self.runner
+                .take()
+                .expect("runner hanya boleh diambil sekali"),
             cwd,
         )
     }

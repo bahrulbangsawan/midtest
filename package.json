@@ -1,10 +1,12 @@
 {
-  "name": "midscene-desktop",
+  "name": "midtest",
   "version": "1.0.0",
-  "description": "",
+  "description": "MidTest desktop agent for AI-powered application testing",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run test --workspace=midscene-mcp && npm test --prefix app",
+    "typecheck": "npm run typecheck --workspace=midscene-mcp && npm run typecheck --prefix app",
+    "build": "npm run build --prefix app",
     "playground": "node --env-file=.env node_modules/@midscene/computer-playground/bin/computer-playground",
     "example": "node --env-file=.env example.ts"
   },

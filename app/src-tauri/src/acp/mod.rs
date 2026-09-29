@@ -20,20 +20,20 @@ pub mod session;
 pub(crate) mod testing;
 
 pub use client::{
-    ClientContext, DEFAULT_PERMISSION_TIMEOUT, EVENT_AGENT_DISCONNECTED, EVENT_AGUI,
-    EVENT_PERMISSION_REQUEST, EventSink, NullSink, PermissionError, PermissionMap,
+    ClientContext, EventSink, NullSink, PermissionError, PermissionMap, DEFAULT_PERMISSION_TIMEOUT,
+    EVENT_AGENT_DISCONNECTED, EVENT_AGUI, EVENT_PERMISSION_REQUEST,
 };
 pub use events::to_agui;
-pub use session::{DEFAULT_SESSION_TIMEOUT, new_session, new_session_with_timeout};
+pub use session::{new_session, new_session_with_timeout, DEFAULT_SESSION_TIMEOUT};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, Implementation, InitializeRequest, InitializeResponse,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, ConnectionTo};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -101,12 +101,14 @@ impl fmt::Display for AcpError {
         match self {
             Self::Protocol(error) => write!(f, "protokol ACP gagal: {error}"),
             Self::ConnectionClosed(detail) => {
-                write!(f, "koneksi ACP tertutup sebelum initialize selesai: {detail}")
+                write!(
+                    f,
+                    "koneksi ACP tertutup sebelum initialize selesai: {detail}"
+                )
             }
-            Self::HandshakeTimeout(budget) => write!(
-                f,
-                "adapter tidak menjawab initialize dalam {budget:?}",
-            ),
+            Self::HandshakeTimeout(budget) => {
+                write!(f, "adapter tidak menjawab initialize dalam {budget:?}",)
+            }
             Self::SessionTimeout(budget) => write!(
                 f,
                 "adapter tidak menjawab session/new dalam {budget:?}; \
@@ -265,21 +267,18 @@ fn resolve_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
 ///
 /// # Kopling yang menahan seluruh desain handler
 ///
-/// [`client::builder`] hanya mendaftarkan **satu** handler request:
-/// `session/request_permission`. Itu aman semata-mata karena nilai yang
-/// dikembalikan fungsi ini mengiklankan `fs.readTextFile = false`,
-/// `fs.writeTextFile = false`, dan `terminal = false`, sehingga agen yang patuh
-/// tidak akan pernah mengirim `fs/*` atau `terminal/*`.
+/// [`client::builder`] menangani `session/request_permission` dan memasang
+/// fallback `UntypedMessage` yang menolak method lain dengan `-32601`. Nilai
+/// bawaan di sini tetap mengiklankan `fs.readTextFile = false`,
+/// `fs.writeTextFile = false`, dan `terminal = false`: aplikasi tidak punya UI
+/// untuk kemampuan tersebut, jadi mengiklankannya akan menyesatkan agen.
 ///
-/// Kopling itu rapuh ke satu arah dan **senyap** bila dilanggar: setiap request
-/// agen→klien membawa `sessionId`, dan request ber-`sessionId` yang tidak punya
-/// handler tidak dibalas `method not found` melainkan masuk antrean retry
-/// selamanya (lihat tabel di dokumentasi [`client`]). Jadi menyalakan satu
-/// kapabilitas di sini tanpa menambah handler-nya akan **membekukan setiap
-/// sesi** yang menyentuh berkas atau terminal — persis kelas kegagalan yang
-/// Task 6 ada untuk dihapus, dan tanpa satu pun pesan galat.
+/// Bila kemampuan baru dinyalakan, handler fungsionalnya tetap harus ikut
+/// ditambahkan. Fallback membuat kegagalan agen yang tidak patuh menjadi
+/// eksplisit alih-alih membekukan sesi, tetapi ia bukan implementasi filesystem
+/// atau terminal.
 ///
-/// [`kapabilitas_dan_handler_harus_berubah_bersama`] menjaga kopling ini: ia
+/// [`kapabilitas_dan_handler_harus_berubah_bersama`] menjaga keputusan itu: ia
 /// gagal begitu ada kapabilitas yang dinyalakan, dan pesan gagalnya menyebut
 /// handler apa yang harus ikut didaftarkan.
 ///
@@ -329,8 +328,9 @@ pub async fn connect_with_timeout(
     let cwd = resolve_cwd(cwd)?;
     let agent = AcpAgent::new(AcpAgentConfig::new(spec.bin));
 
-    let (ready_tx, ready_rx) =
-        oneshot::channel::<Result<(ConnectionTo<Agent>, InitializeResponse), agent_client_protocol::Error>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<
+        Result<(ConnectionTo<Agent>, InitializeResponse), agent_client_protocol::Error>,
+    >();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let runner = tokio::spawn(async move {
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn resolve_cwd_menolak_path_yang_tidak_ada() {
-        let hilang = Path::new("/jalur/yang/pasti/tidak/ada/midscene-desktop");
+        let hilang = Path::new("/jalur/yang/pasti/tidak/ada/midtest");
 
         match resolve_cwd(hilang) {
             Err(AcpError::InvalidCwd { path, source }) => {
@@ -466,8 +466,8 @@ mod tests {
 
     #[test]
     fn pesan_invalid_cwd_menyebut_path_yang_salah() {
-        let error = resolve_cwd(Path::new("/jalur/yang/pasti/tidak/ada/midscene-desktop"))
-            .expect_err("harus gagal");
+        let error =
+            resolve_cwd(Path::new("/jalur/yang/pasti/tidak/ada/midtest")).expect_err("harus gagal");
 
         assert!(
             error.to_string().contains("/jalur/yang/pasti/tidak/ada"),

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use app_lib::acp::{AcpError, ClientContext};
-use app_lib::agents::AgentSpec;
+use midtest_lib::acp::{AcpError, ClientContext};
+use midtest_lib::agents::AgentSpec;
 
 fn akar_repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -13,7 +13,7 @@ fn akar_repo() -> PathBuf {
 
 #[test]
 fn konfigurasi_sidecar_tidak_menyertakan_field_type() {
-    let cfg = app_lib::sidecar::midscene_server(&akar_repo());
+    let cfg = midtest_lib::sidecar::midscene_server(&akar_repo());
     let json = serde_json::to_value(&cfg).unwrap();
     assert!(
         json.get("type").is_none(),
@@ -21,14 +21,13 @@ fn konfigurasi_sidecar_tidak_menyertakan_field_type() {
     );
     assert_eq!(json["name"], "midscene");
     let args = json["args"].as_array().expect("args harus array");
-    assert!(
-        args.iter()
-            .any(|a| a.as_str().unwrap_or("").contains("--env-file"))
-    );
-    assert!(
-        args.iter()
-            .any(|a| a.as_str().unwrap_or("").ends_with("midscene-mcp/src/index.ts"))
-    );
+    assert!(args
+        .iter()
+        .any(|a| a.as_str().unwrap_or("").contains("--env-file")));
+    assert!(args.iter().any(|a| a
+        .as_str()
+        .unwrap_or("")
+        .ends_with("midscene-mcp/src/index.ts")));
 }
 
 /// Path sidecar yang salah gagal dengan **diam dan hijau**, jadi harus dijaga
@@ -66,14 +65,19 @@ fn path_sidecar_benar_benar_ada() {
 
 #[tokio::test]
 async fn sesi_baru_membuat_id_sesi() {
-    let spec = app_lib::agents::find_agent("claude").unwrap();
+    let spec = midtest_lib::agents::find_agent("claude").unwrap();
     let akar = akar_repo();
-    let (handle, _init) = app_lib::acp::connect(spec, &akar, ClientContext::silent()).await.unwrap();
-    let servers = vec![app_lib::sidecar::midscene_server(&akar)];
-    let sid = app_lib::acp::new_session(&handle, &akar, servers)
+    let (handle, _init) = midtest_lib::acp::connect(spec, &akar, ClientContext::silent())
         .await
         .unwrap();
-    assert!(!sid.to_string().is_empty(), "sessionId tidak boleh kosong");
+    let servers = vec![midtest_lib::sidecar::midscene_server(&akar)];
+    let sid = midtest_lib::acp::new_session(&handle, &akar, servers)
+        .await
+        .unwrap();
+    assert!(
+        !sid.session_id.to_string().is_empty(),
+        "sessionId tidak boleh kosong"
+    );
     handle.shutdown().await;
 }
 
@@ -101,12 +105,13 @@ async fn new_session_menyerah_bila_agen_tak_pernah_menjawab() {
     let akar = akar_repo();
     let anggaran = Duration::from_millis(400);
 
-    let (handle, _init) = app_lib::acp::connect(&bisu, &akar, ClientContext::silent())
+    let (handle, _init) = midtest_lib::acp::connect(&bisu, &akar, ClientContext::silent())
         .await
         .expect("fixture harus lulus handshake");
 
     let mulai = std::time::Instant::now();
-    let hasil = app_lib::acp::new_session_with_timeout(&handle, &akar, Vec::new(), anggaran).await;
+    let hasil =
+        midtest_lib::acp::new_session_with_timeout(&handle, &akar, Vec::new(), anggaran).await;
     let berlalu = mulai.elapsed();
 
     match hasil {

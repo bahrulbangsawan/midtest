@@ -23,9 +23,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{McpServer, NewSessionRequest, SessionId};
+use agent_client_protocol::schema::v1::{McpServer, NewSessionRequest, NewSessionResponse};
 
-use super::{AcpError, AcpHandle, resolve_cwd};
+use super::{resolve_cwd, AcpError, AcpHandle};
 
 /// Batas waktu bawaan untuk menunggu balasan `session/new`.
 ///
@@ -78,7 +78,7 @@ pub async fn new_session(
     handle: &AcpHandle,
     cwd: &Path,
     servers: Vec<McpServer>,
-) -> Result<SessionId, AcpError> {
+) -> Result<NewSessionResponse, AcpError> {
     new_session_with_timeout(handle, cwd, servers, DEFAULT_SESSION_TIMEOUT).await
 }
 
@@ -99,7 +99,7 @@ pub async fn new_session_with_timeout(
     cwd: &Path,
     servers: Vec<McpServer>,
     budget: Duration,
-) -> Result<SessionId, AcpError> {
+) -> Result<NewSessionResponse, AcpError> {
     let sent = handle
         .connection()
         .send_request(request(cwd, servers)?)
@@ -111,7 +111,7 @@ pub async fn new_session_with_timeout(
     // Jadi koneksinya tetap sehat setelah timeout — yang gugur hanya satu
     // permintaan, bukan seluruh handle.
     match tokio::time::timeout(budget, sent).await {
-        Ok(response) => Ok(response?.session_id),
+        Ok(response) => Ok(response?),
         Err(_) => Err(AcpError::SessionTimeout(budget)),
     }
 }
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn permintaan_menolak_cwd_yang_tidak_ada() {
-        let hilang = Path::new("/jalur/yang/pasti/tidak/ada/midscene-desktop");
+        let hilang = Path::new("/jalur/yang/pasti/tidak/ada/midtest");
 
         match request(hilang, Vec::new()) {
             Err(AcpError::InvalidCwd { path, .. }) => assert_eq!(path, hilang),

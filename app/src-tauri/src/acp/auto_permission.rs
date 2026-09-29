@@ -1,4 +1,6 @@
-use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionId, PermissionOptionKind};
+use agent_client_protocol::schema::v1::{
+    PermissionOption, PermissionOptionId, PermissionOptionKind,
+};
 
 /// Choose an option that genuinely means "allow", for full-permissions mode.
 ///

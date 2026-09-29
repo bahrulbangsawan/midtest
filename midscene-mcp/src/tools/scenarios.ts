@@ -15,7 +15,7 @@ export function registerScenarioTools(
     'save_scenario',
     {
       description:
-        'Freeze a sequence of steps that worked during exploration into a reusable Midscene YAML scenario. Run this once the flow is proven. Write the flow as explicit steps (ai, aiAssert, aiWaitFor, ...), one per action — that is what run_scenario can count and charge, and what the Midscene cache can make cheap on replay. Do not use runGherkinScenario: run_scenario refuses it with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run and Midscene disables caching for it.',
+        'Freeze a sequence of steps that worked during exploration into a reusable Midscene YAML scenario. Run this once the flow is proven. Write the flow as explicit steps (ai, aiAssert, aiWaitFor, ...), one per action — that lets run_scenario reserve one bounded session-budget operation per flow item, while eligible work can use the Midscene cache on replay. This is a budget guard, not a count of raw model calls: one Midscene operation may re-plan internally. Do not use runGherkinScenario: run_scenario refuses it with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run and Midscene disables caching for it.',
       inputSchema: {
         name: z.string().describe('Letters, digits, hyphen and underscore only'),
         yaml: z.string().describe('Midscene YAML flow'),
@@ -52,7 +52,7 @@ export function registerScenarioTools(
     'run_scenario',
     {
       description:
-        'Replay a saved scenario end to end with the Midscene cache enabled. For a web target the session first opens the address the scenario declares in its own YAML (page:, browser:, web: or target: — Midscene accepts exactly one of them, each with a url:), so a saved scenario is self-contained; pass url to replay the same flow somewhere else. A web scenario that names no address anywhere is refused with SCENARIO_NO_URL rather than replayed against a blank page. Cached steps skip the vision model entirely, but a replay is still charged against the session budget up front: one AI operation per flow step in the scenario YAML. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs, and one containing runGherkinScenario is refused with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run. Use this for regression runs.',
+        'Replay a saved scenario end to end with the Midscene cache enabled. For a web target the session first opens the address the scenario declares in its own YAML (page:, browser:, web: or target: — Midscene accepts exactly one of them, each with a url:), so a saved scenario is self-contained; pass url to replay the same flow somewhere else. A web scenario that names no address anywhere is refused with SCENARIO_NO_URL rather than replayed against a blank page. Cache hits can skip vision work, while the server reserves one session-budget operation per YAML flow item up front. That budget is a bounded-work guard rather than a count of raw model calls: an uncached Midscene operation may re-plan internally. A scenario with more steps than the budget is refused with BUDGET_EXCEEDED and never runs, and one containing runGherkinScenario is refused with SCENARIO_UNSUPPORTED because its cost cannot be bounded ahead of the run. Use this for regression runs.',
       inputSchema: {
         name: z.string(),
         target: z.enum(['web', 'computer']),

@@ -549,6 +549,34 @@ test('KANARI: cabang dispatch playFlowItem masih sama seperti saat penjaga ini d
   );
 });
 
+/**
+ * `aiTaskHandlerMap` is another dispatch route in `playFlowItem`, but it does not use
+ * the `'X' in flowItem` syntax inspected by the canary above. A new key here is just as
+ * relevant to the bounded-work decision, so make the dependency upgrade noisy instead
+ * of treating the object as an invisible escape hatch.
+ */
+test('KANARI: kunci dispatch simple AI masih ditinjau bersama penjaga budget', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const player = join(akarMidsceneCore(), 'dist', 'es', 'yaml', 'player.mjs');
+  const sumber = await readFile(player, 'utf8');
+  const cocok = sumber.match(/const aiTaskHandlerMap\s*=\s*\{([\s\S]*?)\n\};/);
+  const isi = cocok?.[1];
+  assert.ok(isi, 'aiTaskHandlerMap tidak ditemukan — tinjau ulang kanari ini dan dispatch Midscene');
+
+  const aktual = [...isi.matchAll(/^\s*([A-Za-z0-9_]+)\s*:/gm)]
+    .map((m) => m[1])
+    .sort();
+  const DIPATOK = ['aiAsk', 'aiBoolean', 'aiLocate', 'aiNumber', 'aiQuery', 'aiString'].sort();
+
+  assert.deepEqual(
+    aktual,
+    DIPATOK,
+    'Kunci simple-AI Midscene berubah. Tinjau apakah perilaku/biayanya masih layak ' +
+      'dilindungi satu unit budget per flow item; perbarui penjaga dan daftar DIPATOK ' +
+      'hanya setelah keputusan itu dibuat.',
+  );
+});
+
 test('run_scenario memotong budget sebanyak langkah skenario', async () => {
   const { client, store } = await hubungkanDenganStore({ limit: 10 });
   await store.save('checkout', yamlDenganLangkah(3));

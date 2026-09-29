@@ -114,13 +114,19 @@ test('event dari events.rs jadi pesan asisten lewat StreamProcessor sungguhan', 
     id: 'call-1',
     name: 'mcp__midscene__act',
     input: { instruction: 'klik tombol Masuk' },
+    state: 'complete',
   });
   expect(alat[1]).toMatchObject({
     type: 'tool-call',
     id: 'call-2',
     name: 'mcp__midscene__query',
     input: { query: 'judul halaman' },
+    state: 'complete',
   });
+
+  const hasilAlat = bagian.filter((b) => b.type === 'tool-result');
+  expect(hasilAlat).toHaveLength(2);
+  expect(hasilAlat.every((result) => result.state === 'complete')).toBe(true);
 
   // Urutan bagian sebagaimana `Chat.tsx` akan merendernya, dari atas ke
   // bawah. Bagian teks yang benar tetapi tersusun salah tetap salah di mata
@@ -129,8 +135,10 @@ test('event dari events.rs jadi pesan asisten lewat StreamProcessor sungguhan', 
     'thinking',
     'text',
     'tool-call',
+    'tool-result',
     'text',
     'tool-call',
+    'tool-result',
     'text',
   ]);
 
@@ -200,4 +208,70 @@ test('setiap type yang dikirim Rust punya case di switch processChunk', () => {
     ...new Set(eventDariRust().map((c) => (c as { type: string }).type)),
   ];
   expect(dikirim.filter((type) => !dikenal.has(type))).toEqual([]);
+});
+
+test('tool call diperbarui berdasarkan id melalui queued, running, failed tanpa duplikasi', () => {
+  const processor = new StreamProcessor();
+  const chunks = [
+    { type: 'RUN_STARTED', runId: 'run-fail', threadId: 'thread-1' },
+    {
+      type: 'TOOL_CALL_START',
+      runId: 'run-fail',
+      threadId: 'thread-1',
+      toolCallId: 'call-fail',
+      toolCallName: 'mcp__midscene__act',
+    },
+    {
+      type: 'TOOL_CALL_ARGS',
+      runId: 'run-fail',
+      threadId: 'thread-1',
+      toolCallId: 'call-fail',
+      delta: '{"instruction":"click a missing button"}',
+    },
+  ] as Array<StreamChunk>;
+
+  for (const chunk of chunks) processor.processChunk(chunk);
+  let toolParts = processor.getMessages().flatMap((message) => message.parts).filter(
+    (part) => part.type === 'tool-call',
+  );
+  expect(toolParts).toHaveLength(1);
+  expect(toolParts[0]).toMatchObject({ id: 'call-fail', state: 'input-streaming' });
+
+  processor.processChunk({
+    type: 'TOOL_CALL_END',
+    runId: 'run-fail',
+    threadId: 'thread-1',
+    toolCallId: 'call-fail',
+  } as StreamChunk);
+  toolParts = processor.getMessages().flatMap((message) => message.parts).filter(
+    (part) => part.type === 'tool-call',
+  );
+  expect(toolParts).toHaveLength(1);
+  expect(toolParts[0]).toMatchObject({ id: 'call-fail', state: 'input-complete' });
+
+  processor.processChunk({
+    type: 'TOOL_CALL_RESULT',
+    runId: 'run-fail',
+    threadId: 'thread-1',
+    messageId: 'tool-result-call-fail',
+    toolCallId: 'call-fail',
+    role: 'tool',
+    content: '{"error":"button was not found"}',
+    state: 'output-error',
+  } as StreamChunk);
+  processor.processChunk({
+    type: 'RUN_FINISHED',
+    runId: 'run-fail',
+    threadId: 'thread-1',
+  } as StreamChunk);
+
+  toolParts = processor.getMessages().flatMap((message) => message.parts).filter(
+    (part) => part.type === 'tool-call',
+  );
+  expect(toolParts).toHaveLength(1);
+  expect(toolParts[0]).toMatchObject({
+    id: 'call-fail',
+    state: 'error',
+    output: { error: 'button was not found' },
+  });
 });

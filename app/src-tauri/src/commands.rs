@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, PromptRequest, SessionId,
+    CancelNotification, ContentBlock, PromptRequest, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionId,
+    SetSessionConfigOptionRequest,
 };
 use agent_client_protocol::{Agent, ConnectionTo};
 use serde::Serialize;
@@ -47,15 +49,18 @@ use tokio::sync::Mutex;
 
 use crate::acp::events::{agui_run_error, agui_run_finished, agui_run_started};
 use crate::acp::{
-    AcpError, AcpHandle, ClientContext, EVENT_AGUI, EventSink, InitializeResponseExt, connect,
-    new_session,
+    connect, new_session, AcpError, AcpHandle, ClientContext, EventSink, InitializeResponseExt,
+    EVENT_AGUI,
 };
-use crate::agents::{AgentSpec, find_agent, missing_binary_message, probe};
+use crate::agents::{find_agent, missing_binary_message, probe, AgentSpec};
 use crate::settings;
-use crate::sidecar::midscene_server;
+use crate::sidecar::{midscene_server_with_runtime, RuntimeOverrides};
 
 /// Env var untuk menimpa akar repo yang dipakai sesi dan sidecar MCP.
-const ENV_ROOT: &str = "MIDSCENE_DESKTOP_ROOT";
+const ENV_ROOT: &str = "MIDTEST_ROOT";
+
+/// Nama direktori resource yang membawa runtime MCP dalam bundle Tauri.
+const RUNTIME_RESOURCE_DIR: &str = "midscene-runtime";
 
 /// Emisi event lewat Tauri.
 struct TauriSink {
@@ -70,19 +75,78 @@ impl EventSink for TauriSink {
     }
 }
 
-/// Akar repo: sumber `.env`, entry point sidecar MCP, dan cwd sesi.
-///
-/// Dalam pengembangan, biner ini dibangun dari `app/src-tauri`, jadi akar repo
-/// ada dua tingkat di atas `CARGO_MANIFEST_DIR`. Aplikasi yang sudah dibundel
-/// tidak punya hubungan itu lagi, karena itu [`ENV_ROOT`] selalu menang bila
-/// diset. Task 8/9 boleh menggantinya dengan pemilih direktori sungguhan.
-fn repo_root() -> PathBuf {
-    let raw = std::env::var_os(ENV_ROOT).map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        PathBuf::from,
-    );
-
+fn canonicalize_or_raw(raw: PathBuf) -> PathBuf {
     raw.canonicalize().unwrap_or(raw)
+}
+
+/// Akar yang dipilih eksplisit oleh operator. Ini selalu mendahului bundle
+/// agar pengembangan dan diagnosis dapat menunjuk runtime MCP lain dengan
+/// deterministis.
+fn configured_root() -> Option<PathBuf> {
+    std::env::var_os(ENV_ROOT)
+        .map(PathBuf::from)
+        .map(canonicalize_or_raw)
+}
+
+/// Akar source saat pengembangan. Biner Tauri dibangun dari `app/src-tauri`,
+/// sehingga repo ada dua tingkat di atas manifest Cargo.
+fn source_repo_root() -> PathBuf {
+    canonicalize_or_raw(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// Akar repo yang dipakai test dan mode source.
+#[cfg(test)]
+fn repo_root() -> PathBuf {
+    configured_root().unwrap_or_else(source_repo_root)
+}
+
+/// Cari runtime MCP yang benar-benar ikut disalin ke resource bundle.
+///
+/// Tidak cukup memeriksa direktori saja: entry point TypeScript adalah kontrak
+/// yang dipakai sidecar, jadi bundle parsial harus jatuh ke fallback yang jelas
+/// alih-alih baru gagal jauh di `session/new`.
+fn bundled_runtime_root(resource_dir: &Path) -> Option<PathBuf> {
+    let root = resource_dir.join(RUNTIME_RESOURCE_DIR);
+    root.join("midscene-mcp/src/index.ts")
+        .is_file()
+        .then_some(root)
+}
+
+/// Akar runtime MCP yang berlaku untuk aplikasi berjalan.
+///
+/// Urutannya sengaja eksplisit: override operator, resource bundle yang valid,
+/// lalu source tree (untuk `tauri dev` dan test). Dengan begitu paket release
+/// tidak lagi bergantung pada path build machine.
+fn runtime_root(app: &AppHandle) -> PathBuf {
+    configured_root()
+        .or_else(|| {
+            app.path()
+                .resource_dir()
+                .ok()
+                .and_then(|dir| bundled_runtime_root(&dir))
+        })
+        .unwrap_or_else(source_repo_root)
+}
+
+/// Pilih direktori yang boleh ditulisi aplikasi untuk skenario dan sebagai
+/// workspace awal saat bundle pertama kali dibuka.
+fn application_data_root(app: &AppHandle, fallback: &Path) -> PathBuf {
+    match app.path().app_data_dir() {
+        Ok(path) => match std::fs::create_dir_all(&path) {
+            Ok(()) => path,
+            Err(error) => {
+                eprintln!(
+                    "failed to create app data directory {}, using runtime root: {error}",
+                    path.display()
+                );
+                fallback.to_path_buf()
+            }
+        },
+        Err(error) => {
+            eprintln!("failed to resolve app data directory, using runtime root: {error}");
+            fallback.to_path_buf()
+        }
+    }
 }
 
 /// Terjemahkan kegagalan ACP menjadi kalimat yang berguna bagi pengguna.
@@ -155,6 +219,7 @@ struct TurnTarget {
 struct Session {
     handle: AcpHandle,
     target: TurnTarget,
+    model: Option<ModelSelection>,
 }
 
 /// State aplikasi yang dikelola Tauri.
@@ -162,22 +227,34 @@ pub struct AppState {
     ctx: ClientContext,
     session: Mutex<Option<Session>>,
     root: PathBuf,
+    data_root: PathBuf,
+    settings_lock: std::sync::Mutex<()>,
 }
 
 impl AppState {
     /// Bangun state untuk satu aplikasi Tauri.
     #[must_use]
     pub fn new(app: AppHandle) -> Self {
-        Self::with_sink(Arc::new(TauriSink { app }))
+        let root = runtime_root(&app);
+        let data_root = application_data_root(&app, &root);
+        Self::with_paths(Arc::new(TauriSink { app }), root, data_root)
     }
 
     /// Seperti [`Self::new`], tetapi dengan tujuan emisi apa pun. Test memakai
     /// sink berbasis channel; produksi memakai `AppHandle`.
+    #[cfg(test)]
     fn with_sink(sink: Arc<dyn EventSink>) -> Self {
+        let root = repo_root();
+        Self::with_paths(sink, root.clone(), root)
+    }
+
+    fn with_paths(sink: Arc<dyn EventSink>, root: PathBuf, data_root: PathBuf) -> Self {
         Self {
             ctx: ClientContext::new(sink),
             session: Mutex::new(None),
-            root: repo_root(),
+            root,
+            data_root,
+            settings_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -185,6 +262,29 @@ impl AppState {
     #[must_use]
     pub fn ctx(&self) -> &ClientContext {
         &self.ctx
+    }
+
+    #[must_use]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Direktori data yang writable; berbeda dari resource bundle pada
+    /// aplikasi release.
+    #[must_use]
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    /// Serialize read-modify-write operations over one `settings.json`.
+    ///
+    /// Atomic rename prevents torn files, while this lock preserves fields
+    /// changed by different commands (workspace, browser, and Midscene model)
+    /// from overwriting one another with stale snapshots.
+    pub(crate) fn settings_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.settings_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Ambil target giliran dan **lepaskan kunci sesi sebelum kembali**.
@@ -204,7 +304,20 @@ impl AppState {
     /// minta sendiri, jadi `agent-disconnected` justru akan menyesatkan.
     async fn close(&self, handle: AcpHandle) {
         self.ctx.disarm_disconnect_notice();
+        self.ctx.permissions().clear();
         handle.shutdown().await;
+    }
+
+    /// Tutup sesi aktif bila ada. Idempoten supaya dapat dipanggil baik ketika
+    /// workspace terakhir ditutup maupun saat event loop aplikasi berakhir.
+    pub(crate) async fn shutdown(&self) {
+        let session = self.session.lock().await.take();
+        if let Some(session) = session {
+            self.close(session.handle).await;
+        } else {
+            self.ctx.disarm_disconnect_notice();
+            self.ctx.permissions().clear();
+        }
     }
 }
 
@@ -226,6 +339,66 @@ pub struct AgentInfo {
     pub cwd: String,
     /// Apakah agen menerima gambar di dalam prompt.
     pub supports_image_prompt: bool,
+    /// Models are supplied by the live ACP adapter. An empty list means the
+    /// adapter did not expose a model selector, never that the frontend forgot
+    /// to hardcode one.
+    pub models: Vec<ModelOption>,
+    pub selected_model: Option<String>,
+    pub supports_model_selection: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelSelection {
+    config_id: String,
+    options: Vec<ModelOption>,
+    selected: String,
+}
+
+/// Find the semantically-declared model selector, with a conservative id/name
+/// fallback for adapters that implemented session config before categories
+/// were added to ACP.
+fn model_selection(options: &[SessionConfigOption]) -> Option<ModelSelection> {
+    let option = options.iter().find(|option| {
+        matches!(option.category, Some(SessionConfigOptionCategory::Model))
+            || option.id.to_string().eq_ignore_ascii_case("model")
+            || option.name.eq_ignore_ascii_case("model")
+    })?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let values = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(values) => values
+            .iter()
+            .map(|value| ModelOption {
+                id: value.value.to_string(),
+                label: value.name.clone(),
+                description: value.description.clone(),
+            })
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .map(|value| ModelOption {
+                id: value.value.to_string(),
+                label: value.name.clone(),
+                description: value.description.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(ModelSelection {
+        config_id: option.id.to_string(),
+        options: values,
+        selected: select.current_value.to_string(),
+    })
 }
 
 /// Pencari PATH sungguhan dipakai [`connect_agent`] di produksi.
@@ -242,6 +415,24 @@ fn real_path_lookup(bin: &str) -> Option<PathBuf> {
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelState {
+    pub models: Vec<ModelOption>,
+    pub selected_model: Option<String>,
+    pub supports_model_selection: bool,
+}
+
+impl ModelState {
+    fn from_selection(selection: Option<&ModelSelection>) -> Self {
+        Self {
+            models: selection.map_or_else(Vec::new, |value| value.options.clone()),
+            selected_model: selection.map(|value| value.selected.clone()),
+            supports_model_selection: selection.is_some(),
+        }
+    }
+}
+
 /// Jalankan adapter `agent_id`, selesaikan handshake, dan buka sesi dengan
 /// sidecar Midscene terdaftar sebagai server MCP.
 ///
@@ -252,10 +443,24 @@ fn real_path_lookup(bin: &str) -> Option<PathBuf> {
 /// Kalimat berbahasa Indonesia yang siap ditampilkan; lihat [`user_message`].
 #[tauri::command]
 pub async fn connect_agent(
+    app: AppHandle,
     state: State<'_, AppState>,
     agent_id: String,
+    workspace_path: Option<String>,
+    preferred_model: Option<String>,
 ) -> Result<AgentInfo, String> {
-    connect_agent_body(&state, agent_id, &real_path_lookup).await
+    let workspace = workspace_path.map(PathBuf::from);
+    let stored = settings::load(&config_dir(&app)?);
+    let overrides = crate::system::runtime_overrides(state.root(), &stored)?;
+    connect_agent_body_with_runtime(
+        &state,
+        agent_id,
+        workspace.as_deref(),
+        preferred_model.as_deref(),
+        &real_path_lookup,
+        &overrides,
+    )
+    .await
 }
 
 /// Badan [`connect_agent`], bebas dari `State` milik Tauri dan dari pencari
@@ -281,10 +486,41 @@ pub async fn connect_agent(
 ///   yang menyebut `codex login` — lihat dokumentasi fungsi itu untuk kenapa
 ///   ini berbasis perilaku, bukan tebakan atas `authMethods`;
 /// - kegagalan lain → lihat [`user_message`].
+#[cfg(test)]
 async fn connect_agent_body(
     state: &AppState,
     agent_id: String,
     path_lookup: &(dyn Fn(&str) -> Option<PathBuf> + Send + Sync),
+) -> Result<AgentInfo, String> {
+    connect_agent_body_with_options(state, agent_id, None, None, path_lookup).await
+}
+
+#[cfg(test)]
+async fn connect_agent_body_with_options(
+    state: &AppState,
+    agent_id: String,
+    workspace: Option<&Path>,
+    preferred_model: Option<&str>,
+    path_lookup: &(dyn Fn(&str) -> Option<PathBuf> + Send + Sync),
+) -> Result<AgentInfo, String> {
+    connect_agent_body_with_runtime(
+        state,
+        agent_id,
+        workspace,
+        preferred_model,
+        path_lookup,
+        &RuntimeOverrides::default(),
+    )
+    .await
+}
+
+async fn connect_agent_body_with_runtime(
+    state: &AppState,
+    agent_id: String,
+    workspace: Option<&Path>,
+    preferred_model: Option<&str>,
+    path_lookup: &(dyn Fn(&str) -> Option<PathBuf> + Send + Sync),
+    runtime_overrides: &RuntimeOverrides,
 ) -> Result<AgentInfo, String> {
     let spec: &'static AgentSpec =
         find_agent(&agent_id).ok_or_else(|| format!("Agen \"{agent_id}\" tidak dikenal."))?;
@@ -298,13 +534,25 @@ async fn connect_agent_body(
         state.close(previous.handle).await;
     }
 
-    let root = state.root.clone();
-    let (handle, initialize) = connect(spec, &root, state.ctx.clone())
+    let runtime_root = state.root.clone();
+    let data_root = state.data_root.clone();
+    let cwd = workspace.unwrap_or(&runtime_root);
+    let (handle, initialize) = connect(spec, cwd, state.ctx.clone())
         .await
         .map_err(|error| user_message(&error))?;
 
-    let session_id = match new_session(&handle, &root, vec![midscene_server(&root)]).await {
-        Ok(session_id) => session_id,
+    let response = match new_session(
+        &handle,
+        cwd,
+        vec![midscene_server_with_runtime(
+            &runtime_root,
+            &data_root,
+            runtime_overrides,
+        )],
+    )
+    .await
+    {
+        Ok(response) => response,
         Err(error) => {
             // Handshake sudah berhasil, jadi proses anaknya hidup. Jangan
             // biarkan ia bocor hanya karena sesinya gagal dibuat.
@@ -318,6 +566,35 @@ async fn connect_agent_body(
         }
     };
 
+    let session_id = response.session_id;
+    let mut model = response.config_options.as_deref().and_then(model_selection);
+
+    if let (Some(preferred), Some(selection)) = (preferred_model, model.as_ref()) {
+        let is_available = selection
+            .options
+            .iter()
+            .any(|option| option.id == preferred);
+        if is_available && selection.selected != preferred {
+            let request = SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                selection.config_id.clone(),
+                preferred,
+            );
+            match handle.connection().send_request(request).block_task().await {
+                Ok(updated) => {
+                    model = model_selection(&updated.config_options);
+                }
+                Err(error) => {
+                    state.close(handle).await;
+                    return Err(format!(
+                        "Model {preferred} tidak dapat dipilih oleh agen {label}: {error}",
+                        label = spec.label
+                    ));
+                }
+            }
+        }
+    }
+
     let thread_id = session_id.0.to_string();
     state.ctx.begin_thread(thread_id.clone());
 
@@ -329,19 +606,227 @@ async fn connect_agent_body(
         thread_id,
         cwd: handle.cwd().display().to_string(),
         supports_image_prompt: initialize.supports_image_prompt(),
+        models: model
+            .as_ref()
+            .map_or_else(Vec::new, |selection| selection.options.clone()),
+        selected_model: model.as_ref().map(|selection| selection.selected.clone()),
+        supports_model_selection: model.is_some(),
     };
 
     let target = TurnTarget {
         connection: handle.connection().clone(),
         session_id,
     };
-    *guard = Some(Session { handle, target });
+    *guard = Some(Session {
+        handle,
+        target,
+        model,
+    });
 
     // Paling akhir: sejak titik ini putusnya koneksi memang kabar buruk yang
     // hanya bisa disampaikan lewat event.
     state.ctx.arm_disconnect_notice();
 
     Ok(info)
+}
+
+/// Change the live session model using the selector exposed by the ACP agent.
+/// No model ids are invented in the desktop client.
+#[tauri::command]
+pub async fn set_agent_model(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<ModelState, String> {
+    let mut guard = state.session.lock().await;
+    let session = guard
+        .as_mut()
+        .ok_or_else(|| "Belum terhubung ke agen. Sambungkan agen lebih dulu.".to_owned())?;
+    let selection = session.model.as_ref().ok_or_else(|| {
+        "Agen ini tidak mengekspos pemilih model melalui ACP. Model bawaan agen tetap digunakan."
+            .to_owned()
+    })?;
+    if !selection.options.iter().any(|option| option.id == model_id) {
+        return Err(format!(
+            "Model \"{model_id}\" tidak tersedia pada sesi ini. Muat ulang daftar model dari agen."
+        ));
+    }
+    if selection.selected == model_id {
+        return Ok(ModelState::from_selection(session.model.as_ref()));
+    }
+
+    let request = SetSessionConfigOptionRequest::new(
+        session.target.session_id.clone(),
+        selection.config_id.clone(),
+        model_id.as_str(),
+    );
+    let updated = session
+        .target
+        .connection
+        .send_request(request)
+        .block_task()
+        .await
+        .map_err(|error| format!("Model gagal diubah: {error}"))?;
+    session.model = model_selection(&updated.config_options);
+    Ok(ModelState::from_selection(session.model.as_ref()))
+}
+
+fn workspace_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Workspace")
+        .to_owned()
+}
+
+fn validate_workspace_path(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "Folder {} tidak dapat dibuka. Folder mungkin sudah dipindah atau dihapus: {error}",
+            path.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!("{} bukan sebuah folder.", canonical.display()));
+    }
+    std::fs::read_dir(&canonical).map_err(|error| {
+        format!(
+            "Akses ke folder {} ditolak atau tidak tersedia: {error}",
+            canonical.display()
+        )
+    })?;
+    Ok(canonical)
+}
+
+fn default_workspace(path: &Path) -> settings::Workspace {
+    let thread = settings::Thread {
+        id: "thread-main".to_owned(),
+        title: "New thread".to_owned(),
+    };
+    settings::Workspace {
+        path: path.display().to_string(),
+        name: workspace_name(path),
+        threads: vec![thread.clone()],
+        selected_thread_id: Some(thread.id),
+    }
+}
+
+fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map_err(|error| format!("Direktori pengaturan aplikasi tidak tersedia: {error}"))
+}
+
+fn normalized_settings(state: &AppState, mut stored: settings::Settings) -> settings::Settings {
+    if stored.workspaces.is_empty() {
+        stored.workspaces.push(default_workspace(state.data_root()));
+    }
+    if stored.selected_workspace.as_ref().is_none_or(|selected| {
+        !stored
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.path == *selected)
+    }) {
+        stored.selected_workspace = stored
+            .workspaces
+            .first()
+            .map(|workspace| workspace.path.clone());
+    }
+    if find_agent(&stored.default_provider).is_none() {
+        stored.default_provider = "claude".to_owned();
+    }
+    for workspace in &mut stored.workspaces {
+        if workspace.name.trim().is_empty() {
+            workspace.name = workspace_name(Path::new(&workspace.path));
+        }
+        if workspace.threads.is_empty() {
+            workspace.threads.push(settings::Thread {
+                id: "thread-main".to_owned(),
+                title: "New thread".to_owned(),
+            });
+        }
+        if workspace
+            .selected_thread_id
+            .as_ref()
+            .is_none_or(|selected| {
+                !workspace
+                    .threads
+                    .iter()
+                    .any(|thread| thread.id == *selected)
+            })
+        {
+            workspace.selected_thread_id =
+                workspace.threads.first().map(|thread| thread.id.clone());
+        }
+    }
+    stored
+}
+
+/// Load every durable UI preference. Missing workspaces are deliberately not
+/// removed here; attempting to connect will produce the actionable path error.
+#[tauri::command]
+pub fn get_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<settings::Settings, String> {
+    let dir = config_dir(&app)?;
+    let mut stored = normalized_settings(&state, settings::load(&dir));
+    stored.full_permissions = state.ctx.full_permissions();
+    Ok(stored)
+}
+
+/// Persist frontend-owned preferences while keeping the runtime permission
+/// flag authoritative. This prevents a stale React snapshot from changing the
+/// safety mode as a side effect of renaming a thread.
+#[tauri::command]
+pub fn save_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut value: settings::Settings,
+) -> Result<settings::Settings, String> {
+    let _settings_lock = state.settings_lock();
+    value.full_permissions = state.ctx.full_permissions();
+    let value = normalized_settings(&state, value);
+    let dir = config_dir(&app)?;
+    settings::save(&dir, &value)
+        .map_err(|error| format!("Pengaturan aplikasi gagal disimpan: {error}"))?;
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddWorkspaceResult {
+    pub settings: settings::Settings,
+    pub added: bool,
+}
+
+/// Validate, canonicalize, deduplicate, and persist a folder selected by the
+/// native dialog.
+#[tauri::command]
+pub fn add_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<AddWorkspaceResult, String> {
+    let canonical = validate_workspace_path(Path::new(&path))?;
+    let canonical_string = canonical.display().to_string();
+    let dir = config_dir(&app)?;
+    let _settings_lock = state.settings_lock();
+    let mut stored = normalized_settings(&state, settings::load(&dir));
+    let added = !stored
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.path == canonical_string);
+    if added {
+        stored.workspaces.push(default_workspace(&canonical));
+    }
+    stored.selected_workspace = Some(canonical_string);
+    stored.full_permissions = state.ctx.full_permissions();
+    settings::save(&dir, &stored)
+        .map_err(|error| format!("Workspace valid, tetapi gagal disimpan: {error}"))?;
+    Ok(AddWorkspaceResult {
+        settings: stored,
+        added,
+    })
 }
 
 /// Jalankan satu giliran dan bingkai alirannya dengan `RUN_STARTED` /
@@ -451,6 +936,17 @@ async fn cancel_turn_body(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 pub async fn cancel_turn(state: State<'_, AppState>) -> Result<(), String> {
     cancel_turn_body(&state).await
+}
+
+/// Tutup sesi ACP aktif secara eksplisit.
+///
+/// Dipanggil ketika workspace terakhir dilupakan; hook event loop juga memakai
+/// metode state yang sama saat aplikasi keluar. Tidak ada sesi adalah hasil
+/// normal, sehingga command ini idempoten dan selalu berhasil.
+#[tauri::command]
+pub async fn disconnect_agent(state: State<'_, AppState>) -> Result<(), String> {
+    state.shutdown().await;
+    Ok(())
 }
 
 /// Teruskan pilihan pengguna ke permintaan izin yang sedang menunggu.
@@ -564,13 +1060,18 @@ fn apply_and_persist_full_permissions(
         dir,
         &settings::Settings {
             full_permissions: enabled,
+            ..settings::load(dir)
         },
     )
     .map_err(|error| {
         // `load` infalibel, jadi aman dipanggil di jalur galat: ia memberi tahu
         // kita apa yang **sungguh** akan terbaca pada peluncuran berikutnya.
         let tersimpan = settings::load(dir).full_permissions;
-        persist_failure_message(enabled, Some(tersimpan), &format!("{error} ({})", dir.display()))
+        persist_failure_message(
+            enabled,
+            Some(tersimpan),
+            &format!("{error} ({})", dir.display()),
+        )
     })
 }
 
@@ -604,6 +1105,7 @@ pub fn set_full_permissions(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
+    let _settings_lock = state.settings_lock();
     let dir = match app.path().app_config_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -627,8 +1129,8 @@ pub fn set_full_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::testing::{recording_context, FakeAgent, RecordingSink, TEST_TIMEOUT};
     use crate::acp::EVENT_AGENT_DISCONNECTED;
-    use crate::acp::testing::{FakeAgent, RecordingSink, TEST_TIMEOUT, recording_context};
     use serde_json::json;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -646,6 +1148,21 @@ mod tests {
             "akar repo harus berisi midscene-mcp, dapat {}",
             root.display()
         );
+    }
+
+    #[test]
+    fn runtime_bundle_hanya_dipilih_bila_entry_point_lengkap() {
+        let resource_dir = dir_sementara();
+        assert!(bundled_runtime_root(&resource_dir).is_none());
+
+        let runtime = resource_dir.join(RUNTIME_RESOURCE_DIR);
+        std::fs::create_dir_all(runtime.join("midscene-mcp/src"))
+            .expect("struktur resource test harus dapat dibuat");
+        std::fs::write(runtime.join("midscene-mcp/src/index.ts"), "// entry")
+            .expect("entry point test harus dapat ditulis");
+
+        assert_eq!(bundled_runtime_root(&resource_dir), Some(runtime));
+        std::fs::remove_dir_all(resource_dir).expect("resource test harus dapat dibersihkan");
     }
 
     /// Pesan galat dipisahkan per fase supaya pengguna tahu apa yang harus
@@ -684,6 +1201,9 @@ mod tests {
             thread_id: "sesi-1".into(),
             cwd: "/tmp".into(),
             supports_image_prompt: true,
+            models: Vec::new(),
+            selected_model: None,
+            supports_model_selection: false,
         })
         .expect("harus terserialisasi");
 
@@ -701,7 +1221,8 @@ mod tests {
     async fn connect_agent_dengan_id_tak_dikenal_menyebut_id_itu() {
         let (state, _events) = state_uji();
         // Pencari tidak relevan di jalur ini: `find_agent` gagal duluan.
-        let tak_dipanggil = |_: &str| panic!("path_lookup tidak boleh dipanggil untuk id tak dikenal");
+        let tak_dipanggil =
+            |_: &str| panic!("path_lookup tidak boleh dipanggil untuk id tak dikenal");
 
         let galat = connect_agent_body(&state, "agen-siluman".into(), &tak_dipanggil)
             .await
@@ -903,6 +1424,7 @@ mod tests {
         *state.session.lock().await = Some(Session {
             handle: agen.handle(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             target,
+            model: None,
         });
 
         // Ambil target seperti `send_prompt`, lalu jalankan giliran yang tidak
@@ -1170,6 +1692,7 @@ mod tests {
         *state.session.lock().await = Some(Session {
             handle: agen.handle(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             target,
+            model: None,
         });
 
         let diambil = state.turn_target().await.expect("sesi harus ada");
@@ -1243,6 +1766,37 @@ mod tests {
             assert_ne!(
                 nama, EVENT_AGENT_DISCONNECTED,
                 "penutupan yang disengaja tidak boleh melaporkan putus: {payload}"
+            );
+        }
+    }
+
+    /// `disconnect_agent` dan hook keluar aplikasi harus benar-benar menutup
+    /// transport, mengosongkan sesi, dan membatalkan dialog izin yang mungkin
+    /// masih tampil. Tanpa tiga efek itu, proses adapter atau pilihan izin basi
+    /// dapat hidup melampaui workspace yang baru saja ditutup.
+    #[tokio::test]
+    async fn shutdown_state_menutup_sesi_dan_membersihkan_izin() {
+        let (state, events) = state_uji();
+        let mut agen = FakeAgent::start(state.ctx(), events).await;
+        let target = turn_target_of(&agen);
+        *state.session.lock().await = Some(Session {
+            handle: agen.handle(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+            target,
+            model: None,
+        });
+        let penunggu = state.ctx().permissions().daftar("izin-lama".to_owned());
+        state.ctx().arm_disconnect_notice();
+
+        state.shutdown().await;
+
+        assert!(state.session.lock().await.is_none());
+        assert_eq!(state.ctx().permissions().pending_count(), 0);
+        assert!(penunggu.await.is_err(), "izin lama harus dibatalkan");
+        agen.wait_closed().await;
+        while let Some((nama, payload)) = agen.try_next_event() {
+            assert_ne!(
+                nama, EVENT_AGENT_DISCONNECTED,
+                "penutupan disengaja tidak boleh dilaporkan: {payload}"
             );
         }
     }
@@ -1640,5 +2194,56 @@ if __KELUAR_LAMBAT__:
             tunggu_mati(claude.pid(), Duration::from_secs(2)).await,
             "proses claude yang gagal membuat sesi tidak boleh tertinggal"
         );
+    }
+
+    #[test]
+    fn pemilih_model_dibaca_dari_config_acp_bukan_daftar_hardcode() {
+        use agent_client_protocol::schema::v1::SessionConfigSelectOption;
+
+        let options = vec![SessionConfigOption::select(
+            "runtime-model",
+            "Runtime model",
+            "claude-sonnet",
+            vec![
+                SessionConfigSelectOption::new("claude-sonnet", "Claude Sonnet")
+                    .description("Balanced"),
+                SessionConfigSelectOption::new("claude-opus", "Claude Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+
+        let selection = model_selection(&options).expect("kategori model harus dikenali");
+        assert_eq!(selection.config_id, "runtime-model");
+        assert_eq!(selection.selected, "claude-sonnet");
+        assert_eq!(selection.options.len(), 2);
+        assert_eq!(selection.options[1].id, "claude-opus");
+        assert_eq!(
+            selection.options[0].description.as_deref(),
+            Some("Balanced")
+        );
+    }
+
+    #[test]
+    fn validasi_workspace_membedakan_folder_dari_file_dan_path_hilang() {
+        let root = std::env::temp_dir().join(format!(
+            "midscene-workspace-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("bukan-folder.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        assert_eq!(
+            validate_workspace_path(&root).unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert!(validate_workspace_path(&file)
+            .unwrap_err()
+            .contains("bukan sebuah folder"));
+        assert!(validate_workspace_path(&root.join("hilang")).is_err());
     }
 }

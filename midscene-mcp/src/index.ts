@@ -7,6 +7,10 @@ import { ScenarioStore } from './scenarios.ts';
 import { createDevice } from './devices/factory.ts';
 
 const root = process.env.MIDSCENE_MCP_ROOT ?? process.cwd();
+// Source code in a packaged desktop app lives in its read-only application
+// bundle. Keep mutable scenarios in the app data directory while preserving
+// the historical source-root default for direct MCP usage and development.
+const dataRoot = process.env.MIDSCENE_MCP_DATA_DIR || root;
 const budgetMentah = process.env.MIDSCENE_MCP_BUDGET;
 const budgetDiminta = Number(budgetMentah);
 // `SessionManager` re-checks this itself; the check is repeated here only so an
@@ -24,7 +28,7 @@ const sessions = new SessionManager(
   (target, opts) => createDevice(target, { ...opts, cacheId: `midscene-mcp-${target}` }),
   budget,
 );
-const store = new ScenarioStore(join(root, 'scenarios'));
+const store = new ScenarioStore(join(dataRoot, 'scenarios'));
 const buildDemoPath = join(root, 'build-demo.js');
 
 const server = createServer({ sessions, store, buildDemoPath });

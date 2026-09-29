@@ -2,7 +2,7 @@
 
 Tanggal: 2026-08-05
 
-Kelanjutan dari `2026-08-04-midscene-desktop-design.md`. Rencana 2a menghasilkan
+Kelanjutan dari `2026-08-04-midtest-design.md`. Rencana 2a menghasilkan
 aplikasi yang berfungsi: tersambung ke agen ACP, mengalirkan balasan, dan menjalankan
 tool Midscene lewat gerbang izin. Dokumen ini merancang apa yang membuatnya layak
 dipakai sehari-hari.

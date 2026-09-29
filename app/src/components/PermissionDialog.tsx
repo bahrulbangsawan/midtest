@@ -173,7 +173,7 @@ export function PermissionDialog() {
       {galat ? (
         <p
           role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          className="fixed bottom-4 right-4 z-50 max-w-md rounded-xl border border-destructive/40 bg-popover px-3 py-2 text-sm text-destructive"
         >
           {galat}
         </p>

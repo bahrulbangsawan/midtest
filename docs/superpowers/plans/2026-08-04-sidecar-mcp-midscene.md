@@ -1814,7 +1814,7 @@ export class ComputerDeviceAdapter implements Device {
 Catatan implementasi: bentuk kembalian `logScreenshot` dan nama properti report belum diverifikasi. Sebelum menulis kode ini, jalankan sekali untuk memeriksa keduanya:
 
 ```bash
-cd /Users/rulisme/midscene-desktop && node --env-file=.env -e "
+cd /Users/rulisme/midtest && node --env-file=.env -e "
 const { agentForComputer } = await import('@midscene/computer');
 const a = await agentForComputer({});
 console.log('logScreenshot →', typeof (await a.logScreenshot()));
@@ -2027,9 +2027,9 @@ Isi wajib, dalam bahasa Indonesia:
   "mcpServers": {
     "midscene": {
       "command": "node",
-      "args": ["/absolute/path/to/midscene-desktop/midscene-mcp/src/index.ts"],
+      "args": ["/absolute/path/to/midtest/midscene-mcp/src/index.ts"],
       "env": {
-        "MIDSCENE_MCP_ROOT": "/absolute/path/to/midscene-desktop"
+        "MIDSCENE_MCP_ROOT": "/absolute/path/to/midtest"
       }
     }
   }
@@ -2046,7 +2046,7 @@ Isi wajib, dalam bahasa Indonesia:
 Ini satu-satunya langkah yang memakai API key dan membakar biaya. Jalankan sendiri:
 
 ```
-! cd /Users/rulisme/midscene-desktop && npm test --prefix midscene-mcp
+! cd /Users/rulisme/midtest && npm test --prefix midscene-mcp
 ```
 
 Lalu daftarkan server ke Claude Code atau Zed dengan konfigurasi di atas, dan minta agen: *"gunakan tool midscene: mulai sesi web ke https://example.com, pastikan judulnya memuat kata Example, lalu tutup sesi."*

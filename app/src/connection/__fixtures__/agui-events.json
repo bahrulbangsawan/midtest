@@ -55,6 +55,16 @@
     "toolCallId": "call-1"
   },
   {
+    "type": "TOOL_CALL_RESULT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "tool-result-call-1",
+    "toolCallId": "call-1",
+    "role": "tool",
+    "content": "{\"status\":\"completed\"}",
+    "state": "output-available"
+  },
+  {
     "type": "TEXT_MESSAGE_START",
     "runId": "run-fikstur",
     "threadId": "thread-fikstur",
@@ -85,6 +95,16 @@
     "runId": "run-fikstur",
     "threadId": "thread-fikstur",
     "toolCallId": "call-2"
+  },
+  {
+    "type": "TOOL_CALL_RESULT",
+    "runId": "run-fikstur",
+    "threadId": "thread-fikstur",
+    "messageId": "tool-result-call-2",
+    "toolCallId": "call-2",
+    "role": "tool",
+    "content": "{\"status\":\"completed\"}",
+    "state": "output-available"
   },
   {
     "type": "TEXT_MESSAGE_START",
